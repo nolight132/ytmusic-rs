@@ -124,13 +124,20 @@ pub async fn request_device_code(
             .map(str::to_string)
             .with_context(|| format!("device code response missing {key}"))
     };
-    Ok(DeviceCode {
+    let device = DeviceCode {
         device_code: field("device_code")?,
         user_code: field("user_code")?,
         verification_url: field("verification_url")?,
         interval: Duration::from_secs(response["interval"].as_u64().unwrap_or(5)),
         expires_in: Duration::from_secs(response["expires_in"].as_u64().unwrap_or(1800)),
-    })
+    };
+    log::debug!(
+        "oauth: device code {} for {}, expires in {:?}",
+        device.user_code,
+        device.verification_url,
+        device.expires_in
+    );
+    Ok(device)
 }
 
 pub async fn poll_token(
@@ -161,8 +168,11 @@ pub async fn poll_token(
             .await
             .context("cannot parse token response")?;
         match response.get("error").and_then(Value::as_str) {
-            None => return tokens_from(response, identity.clone()),
-            Some("authorization_pending") => {}
+            None => {
+                log::debug!("oauth: device grant approved");
+                return tokens_from(response, identity.clone());
+            }
+            Some("authorization_pending") => log::debug!("oauth: authorization pending"),
             Some("slow_down") => interval += Duration::from_secs(5),
             Some("expired_token") => bail!("sign-in code expired"),
             Some("access_denied") => bail!("sign-in was denied"),

@@ -35,6 +35,9 @@ impl Nav for Value {
         if let Some(text) = node.as_str() {
             return Some(text.to_string());
         }
+        if let Some(text) = node.get("simpleText").and_then(Value::as_str) {
+            return Some(text.to_string());
+        }
         let runs = node.get("runs")?.as_array()?;
         let text: String = runs
             .iter()

@@ -91,6 +91,11 @@ impl YtMusic {
             .bytes()
             .await
             .with_context(|| format!("cannot read {endpoint} response"))?;
+        log::debug!(
+            "{endpoint} via {}: {status}, {} bytes",
+            client.name(),
+            body.len()
+        );
         let Ok(value) = serde_json::from_slice::<Value>(&body) else {
             bail!("{endpoint} returned non-json response with status {status}");
         };

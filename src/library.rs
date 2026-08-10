@@ -1,4 +1,4 @@
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use serde_json::json;
 
 use crate::client::YtMusic;
@@ -50,18 +50,34 @@ impl YtMusic {
         let response = self
             .execute("account/accounts_list", Client::Tv, json!({}))
             .await?;
-        let account = parse::find_renderer(&response, "accountItem")
-            .context("accounts list has no account")?;
-        let name = account
-            .run_text(&["accountName"])
-            .context("account has no name")?;
+        let Some(account) = parse::find_renderer(&response, "accountItem") else {
+            log::warn!(
+                "profile: accounts_list has no accountItem, response: {}",
+                snippet(&response)
+            );
+            anyhow::bail!("accounts list has no account");
+        };
+        log::debug!("profile: accountItem: {account}");
         let email = account
             .run_text(&["channelHandle"])
             .or_else(|| account.run_text(&["accountByline"]));
+        let name = account
+            .run_text(&["accountName"])
+            .or_else(|| email.clone())
+            .unwrap_or_else(|| {
+                log::warn!("profile: account has no name, item: {account}");
+                "YouTube Music".to_string()
+            });
         Ok(Profile {
             name,
             email,
             thumbnails: parse::thumbnails(account),
         })
     }
+}
+
+fn snippet(value: &serde_json::Value) -> String {
+    let mut text = value.to_string();
+    text.truncate(4000);
+    text
 }
