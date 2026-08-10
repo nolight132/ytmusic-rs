@@ -65,7 +65,7 @@ impl YtMusic {
             .iter()
             .filter_map(|format| audio_format(format, client))
             .collect();
-        audio.sort_by(|a, b| b.bitrate.cmp(&a.bitrate));
+        audio.sort_by_key(|format| std::cmp::Reverse(format.bitrate));
         Ok(audio)
     }
 
