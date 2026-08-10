@@ -8,7 +8,7 @@ use crate::context::{Client, random_string};
 use crate::models::AudioFormat;
 
 const STREAM_CLIENTS: [Client; 3] = [Client::AndroidVr, Client::Ios, Client::Android];
-const CHUNK: u64 = 8 * 1024 * 1024;
+const CHUNK: u64 = 1024 * 1024;
 const MAX_STREAM_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -136,11 +136,19 @@ impl YtMusic {
                 .get(&format.url)
                 .header("Range", format!("bytes={offset}-{end}"))
                 .header("User-Agent", format.user_agent)
+                .header("Accept-Encoding", "identity")
+                .header("Origin", "https://www.youtube.com")
+                .header("Referer", "https://www.youtube.com/")
                 .send()
                 .await
-                .context("cannot reach stream host")?
-                .error_for_status()
-                .context("stream host refused the download")?;
+                .context("cannot reach stream host")?;
+            let status = response.status();
+            if !status.is_success() {
+                bail!(
+                    "stream host refused the download with status {status} \
+                     (a proof-of-origin token is likely required)"
+                );
+            }
             let chunk = response.bytes().await.context("cannot read stream chunk")?;
             if chunk.is_empty() {
                 break;

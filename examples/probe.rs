@@ -168,6 +168,45 @@ async fn main() -> anyhow::Result<()> {
                 println!("{:40} {}", playlist.id, playlist.title);
             }
         }
+        "playerurl" => {
+            let client = match std::env::args().nth(3).as_deref() {
+                Some("tv") => ytmusic::Client::Tv,
+                Some("androidvr") => ytmusic::Client::AndroidVr,
+                Some("android") => ytmusic::Client::Android,
+                Some("music") => ytmusic::Client::Music,
+                _ => ytmusic::Client::Ios,
+            };
+            let use_auth = std::env::args().nth(4).as_deref() == Some("auth");
+            let response = api
+                .player_response_with(&argument, client, use_auth)
+                .await?;
+            let formats = response["streamingData"]["adaptiveFormats"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let audio = formats.iter().find(|f| {
+                f["mimeType"]
+                    .as_str()
+                    .map(|m| m.starts_with("audio/mp4"))
+                    .unwrap_or(false)
+            });
+            match audio {
+                Some(f) if f.get("url").is_some() => {
+                    println!("direct");
+                    println!("{}", f["url"].as_str().unwrap());
+                }
+                Some(f) if f.get("signatureCipher").is_some() => println!("cipher"),
+                _ => println!("none"),
+            }
+        }
+        "rawexec" => {
+            let payload: serde_json::Value =
+                serde_json::from_str(&std::env::args().nth(3).unwrap_or_else(|| "{}".to_string()))?;
+            let response = api
+                .execute(&argument, ytmusic::Client::Music, payload)
+                .await?;
+            println!("{}", response);
+        }
         "rmplaylist" => {
             api.delete_playlist(&argument).await?;
             println!("deleted {argument}");
