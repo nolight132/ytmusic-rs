@@ -29,15 +29,8 @@ impl YtMusic {
     }
 
     pub fn with_cookies(cookies: impl Into<String>) -> Self {
-        let cookies: String = cookies
-            .into()
-            .chars()
-            .filter(|c| !c.is_control())
-            .collect::<String>()
-            .trim()
-            .to_string();
         Self {
-            cookies: Some(cookies),
+            cookies: Some(normalize_cookies(&cookies.into())),
             ..Self::anonymous()
         }
     }
@@ -120,9 +113,10 @@ impl YtMusic {
             .json(&body);
         match (cookies, &bearer) {
             (Some(cookies), _) => {
-                let sapisid = sapisid(cookies).context("cookies have no SAPISID")?;
+                let authorization =
+                    sid_authorization(cookies, origin).context("cookies have no SAPISID")?;
                 request = request
-                    .header("Authorization", sid_authorization(sapisid, origin))
+                    .header("Authorization", authorization)
                     .header("Cookie", cookies)
                     .header("X-Origin", origin)
                     .header("X-Goog-AuthUser", "0");
@@ -194,26 +188,56 @@ impl YtMusic {
     }
 }
 
-fn sapisid(cookies: &str) -> Option<&str> {
-    ["SAPISID=", "__Secure-3PAPISID="].iter().find_map(|key| {
-        cookies.split(';').find_map(|pair| {
-            let pair = pair.trim();
-            pair.strip_prefix(key)
+fn normalize_cookies(input: &str) -> String {
+    let raw = input
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            let rest = line
+                .strip_prefix("Cookie:")
+                .or_else(|| line.strip_prefix("cookie:"))?;
+            Some(rest.trim())
         })
+        .unwrap_or_else(|| input.trim());
+    let pairs: Vec<&str> = raw
+        .split(';')
+        .map(str::trim)
+        .filter(|pair| pair.contains('=') && !pair.contains(char::is_whitespace))
+        .collect();
+    pairs.join("; ")
+}
+
+fn cookie_value<'a>(cookies: &'a str, name: &str) -> Option<&'a str> {
+    cookies.split(';').find_map(|pair| {
+        let pair = pair.trim();
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then_some(value)
     })
 }
 
-fn sid_authorization(sapisid: &str, origin: &str) -> String {
-    use sha1::{Digest as _, Sha1};
+fn sapisid(cookies: &str) -> Option<&str> {
+    cookie_value(cookies, "SAPISID").or_else(|| cookie_value(cookies, "__Secure-3PAPISID"))
+}
+
+fn sid_authorization(cookies: &str, origin: &str) -> Option<String> {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(0);
+    let sapisid = sapisid(cookies)?;
+    Some(format!(
+        "SAPISIDHASH {}",
+        sid_hash(timestamp, sapisid, origin)
+    ))
+}
+
+fn sid_hash(timestamp: u64, secret: &str, origin: &str) -> String {
+    use sha1::{Digest as _, Sha1};
     let mut hasher = Sha1::new();
-    hasher.update(format!("{timestamp} {sapisid} {origin}"));
+    hasher.update(format!("{timestamp} {secret} {origin}"));
     let hash = hasher.finalize();
     let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
-    format!("SAPISIDHASH {timestamp}_{hex}")
+    format!("{timestamp}_{hex}")
 }
 
 #[cfg(test)]
@@ -227,6 +251,18 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_header_blob() {
+        let blob = "POST /youtubei/v1/browse HTTP/2\nHost: music.youtube.com\nCookie: SAPISID=abc; SID=def\nOrigin: https://music.youtube.com";
+        assert_eq!(normalize_cookies(blob), "SAPISID=abc; SID=def");
+    }
+
+    #[test]
+    fn normalizes_plain_cookie_string() {
+        let plain = "SAPISID=abc;   SID=def  ";
+        assert_eq!(normalize_cookies(plain), "SAPISID=abc; SID=def");
+    }
+
+    #[test]
     fn falls_back_to_secure_sapisid() {
         let cookies = "__Secure-3PAPISID=only/456";
         assert_eq!(sapisid(cookies), Some("only/456"));
@@ -234,7 +270,8 @@ mod tests {
 
     #[test]
     fn sid_hash_shape() {
-        let auth = sid_authorization("abc", "https://music.youtube.com");
+        let cookies = "SAPISID=abc; __Secure-3PAPISID=ghi";
+        let auth = sid_authorization(cookies, "https://music.youtube.com").unwrap();
         assert!(auth.starts_with("SAPISIDHASH "));
         assert_eq!(auth.split('_').nth(1).map(str::len), Some(40));
     }
