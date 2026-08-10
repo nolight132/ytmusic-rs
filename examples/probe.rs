@@ -168,6 +168,10 @@ async fn main() -> anyhow::Result<()> {
                 println!("{:40} {}", playlist.id, playlist.title);
             }
         }
+        "rmplaylist" => {
+            api.delete_playlist(&argument).await?;
+            println!("deleted {argument}");
+        }
         "suite" => {
             let mut results: Vec<(&str, String)> = Vec::new();
             let pause = || tokio::time::sleep(std::time::Duration::from_secs(3));

@@ -29,8 +29,15 @@ impl YtMusic {
     }
 
     pub fn with_cookies(cookies: impl Into<String>) -> Self {
+        let cookies: String = cookies
+            .into()
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect::<String>()
+            .trim()
+            .to_string();
         Self {
-            cookies: Some(cookies.into()),
+            cookies: Some(cookies),
             ..Self::anonymous()
         }
     }
