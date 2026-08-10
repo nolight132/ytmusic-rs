@@ -12,7 +12,7 @@ const API_BASE: &str = "https://www.youtube.com/youtubei/v1/";
 pub struct YtMusic {
     pub(crate) http: reqwest::Client,
     visitor: String,
-    tokens: RwLock<Tokens>,
+    tokens: Option<RwLock<Tokens>>,
     persist: Option<PathBuf>,
     hl: String,
     gl: String,
@@ -21,9 +21,16 @@ pub struct YtMusic {
 impl YtMusic {
     pub fn new(tokens: Tokens) -> Self {
         Self {
+            tokens: Some(RwLock::new(tokens)),
+            ..Self::anonymous()
+        }
+    }
+
+    pub fn anonymous() -> Self {
+        Self {
             http: reqwest::Client::new(),
             visitor: generate_visitor_data(),
-            tokens: RwLock::new(tokens),
+            tokens: None,
             persist: None,
             hl: "en".to_string(),
             gl: "US".to_string(),
@@ -35,12 +42,17 @@ impl YtMusic {
         self
     }
 
-    pub async fn tokens(&self) -> Tokens {
-        self.tokens.read().await.clone()
+    pub async fn tokens(&self) -> Option<Tokens> {
+        match &self.tokens {
+            Some(tokens) => Some(tokens.read().await.clone()),
+            None => None,
+        }
     }
 
     pub async fn revoke(&self) -> Result<()> {
-        let tokens = self.tokens.read().await.clone();
+        let Some(tokens) = self.tokens().await else {
+            return Ok(());
+        };
         oauth::revoke(&self.http, &tokens).await
     }
 
@@ -55,19 +67,22 @@ impl YtMusic {
             body["isAudioOnly"] = json!(true);
         }
         let url = format!("{API_BASE}{endpoint}?prettyPrint=false&alt=json");
-        let response = self
+        let mut request = self
             .http
             .post(&url)
             .header("Accept", "*/*")
             .header("Accept-Language", "*")
-            .header("Authorization", format!("Bearer {bearer}"))
             .header("Content-Type", "application/json")
             .header("Origin", "https://www.youtube.com")
             .header("User-Agent", client.user_agent())
             .header("X-Goog-Visitor-Id", &self.visitor)
             .header("X-Youtube-Client-Name", client.id().to_string())
             .header("X-Youtube-Client-Version", client.version())
-            .json(&body)
+            .json(&body);
+        if let Some(bearer) = bearer {
+            request = request.header("Authorization", format!("Bearer {bearer}"));
+        }
+        let response = request
             .send()
             .await
             .with_context(|| format!("cannot reach {endpoint}"))?;
@@ -89,14 +104,17 @@ impl YtMusic {
         Ok(value)
     }
 
-    async fn bearer(&self) -> Result<String> {
+    async fn bearer(&self) -> Result<Option<String>> {
+        let Some(slot) = &self.tokens else {
+            return Ok(None);
+        };
         {
-            let tokens = self.tokens.read().await;
+            let tokens = slot.read().await;
             if !tokens.expired() {
-                return Ok(tokens.access_token.clone());
+                return Ok(Some(tokens.access_token.clone()));
             }
         }
-        let mut tokens = self.tokens.write().await;
+        let mut tokens = slot.write().await;
         if tokens.expired() {
             oauth::refresh(&self.http, &mut tokens).await?;
             if let Some(path) = &self.persist
@@ -105,6 +123,6 @@ impl YtMusic {
                 log::warn!("ytmusic: cannot persist refreshed tokens: {error:#}");
             }
         }
-        Ok(tokens.access_token.clone())
+        Ok(Some(tokens.access_token.clone()))
     }
 }
