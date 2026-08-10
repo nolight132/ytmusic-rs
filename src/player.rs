@@ -8,6 +8,8 @@ use crate::context::{Client, random_string};
 use crate::models::AudioFormat;
 
 const STREAM_CLIENTS: [Client; 3] = [Client::AndroidVr, Client::Ios, Client::Android];
+const CHUNK: u64 = 8 * 1024 * 1024;
+const MAX_STREAM_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct Playability {
@@ -59,7 +61,10 @@ impl YtMusic {
             .and_then(|data| data.get("adaptiveFormats"))
             .and_then(Value::as_array)
             .context("player response has no adaptive formats")?;
-        let mut audio: Vec<AudioFormat> = formats.iter().filter_map(audio_format).collect();
+        let mut audio: Vec<AudioFormat> = formats
+            .iter()
+            .filter_map(|format| audio_format(format, client))
+            .collect();
         audio.sort_by(|a, b| b.bitrate.cmp(&a.bitrate));
         Ok(audio)
     }
@@ -85,6 +90,36 @@ impl YtMusic {
         }
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no stream clients configured")))
             .with_context(|| format!("cannot resolve audio stream for {video_id}"))
+    }
+
+    pub async fn download(&self, format: &AudioFormat) -> Result<Vec<u8>> {
+        let total = format.content_length.unwrap_or(MAX_STREAM_BYTES);
+        let mut data = Vec::with_capacity(total.min(CHUNK * 2) as usize);
+        let mut offset = 0u64;
+        while offset < total {
+            let end = (offset + CHUNK - 1).min(total - 1);
+            let response = self
+                .http
+                .get(&format.url)
+                .header("Range", format!("bytes={offset}-{end}"))
+                .header("User-Agent", format.user_agent)
+                .send()
+                .await
+                .context("cannot reach stream host")?
+                .error_for_status()
+                .context("stream host refused the download")?;
+            let chunk = response.bytes().await.context("cannot read stream chunk")?;
+            if chunk.is_empty() {
+                break;
+            }
+            let done = format.content_length.is_none() && (chunk.len() as u64) < CHUNK;
+            offset += chunk.len() as u64;
+            data.extend_from_slice(&chunk);
+            if done {
+                break;
+            }
+        }
+        Ok(data)
     }
 }
 
@@ -115,7 +150,7 @@ fn playability(response: &Value) -> Playability {
     }
 }
 
-fn audio_format(format: &Value) -> Option<AudioFormat> {
+fn audio_format(format: &Value, client: Client) -> Option<AudioFormat> {
     let mime = format.get("mimeType").and_then(Value::as_str)?;
     if !mime.starts_with("audio/") {
         return None;
@@ -144,6 +179,7 @@ fn audio_format(format: &Value) -> Option<AudioFormat> {
             .get("loudnessDb")
             .and_then(Value::as_f64)
             .map(|db| db as f32),
+        user_agent: client.user_agent(),
     })
 }
 
@@ -159,7 +195,7 @@ mod tests {
             "signatureCipher": "s=abc&sp=sig&url=https%3A%2F%2Fx",
             "bitrate": 130000,
         });
-        assert!(audio_format(&format).is_none());
+        assert!(audio_format(&format, Client::Ios).is_none());
     }
 
     #[test]
@@ -173,7 +209,7 @@ mod tests {
             "approxDurationMs": "185000",
             "loudnessDb": -4.5,
         });
-        let parsed = audio_format(&format).unwrap();
+        let parsed = audio_format(&format, Client::Ios).unwrap();
         assert_eq!(parsed.itag, 140);
         assert_eq!(parsed.codec, "mp4a.40.2");
         assert_eq!(parsed.duration, Some(Duration::from_secs(185)));
@@ -192,6 +228,7 @@ mod tests {
                 duration: None,
                 content_length: None,
                 loudness_db: None,
+                user_agent: "",
             },
             AudioFormat {
                 itag: 140,
@@ -202,6 +239,7 @@ mod tests {
                 duration: None,
                 content_length: None,
                 loudness_db: None,
+                user_agent: "",
             },
         ];
         assert_eq!(pick(formats).unwrap().itag, 140);

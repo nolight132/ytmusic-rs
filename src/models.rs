@@ -108,6 +108,7 @@ pub struct AudioFormat {
     pub duration: Option<Duration>,
     pub content_length: Option<u64>,
     pub loudness_db: Option<f32>,
+    pub user_agent: &'static str,
 }
 
 pub fn best_thumbnail(thumbnails: &[Thumbnail]) -> Option<&Thumbnail> {
