@@ -7,9 +7,10 @@ use crate::client::YtMusic;
 use crate::context::{Client, random_string};
 use crate::models::AudioFormat;
 
-const STREAM_CLIENTS: [Client; 3] = [Client::AndroidVr, Client::Ios, Client::Android];
 const CHUNK: u64 = 1024 * 1024;
 const MAX_STREAM_BYTES: u64 = 256 * 1024 * 1024;
+const PLAYER_URL: &str = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false&alt=json";
+const VR_UA: &str = "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
 
 #[derive(Clone, Debug)]
 pub struct Playability {
@@ -25,84 +26,25 @@ impl Playability {
 
 impl YtMusic {
     pub async fn player_response(&self, video_id: &str, client: Client) -> Result<Value> {
-        self.player_response_with(video_id, client, !self.is_cookie_auth())
-            .await
-    }
-
-    pub async fn player_response_with(
-        &self,
-        video_id: &str,
-        client: Client,
-        use_auth: bool,
-    ) -> Result<Value> {
-        self.execute_with(
-            "player",
-            client,
-            json!({
-                "videoId": video_id,
-                "racyCheckOk": true,
-                "contentCheckOk": true,
-                "cpn": random_string(16),
-                "playbackContext": {
-                    "contentPlaybackContext": {
-                        "vis": 0,
-                        "splay": false,
-                        "lactMilliseconds": "-1",
-                    }
-                },
-            }),
-            use_auth,
-        )
-        .await
-    }
-
-    pub async fn audio_formats(&self, video_id: &str, client: Client) -> Result<Vec<AudioFormat>> {
-        self.formats_with(video_id, client, !self.is_cookie_auth())
+        let payload = json!({
+            "videoId": video_id,
+            "racyCheckOk": true,
+            "contentCheckOk": true,
+            "cpn": random_string(16),
+            "playbackContext": {
+                "contentPlaybackContext": {
+                    "vis": 0,
+                    "splay": false,
+                    "lactMilliseconds": "-1",
+                }
+            },
+        });
+        self.execute_with("player", client, payload, !self.is_cookie_auth())
             .await
     }
 
     pub async fn best_audio(&self, video_id: &str) -> Result<AudioFormat> {
-        let mut last_error = None;
-        let attempts = match self.is_cookie_auth() {
-            true => vec![false],
-            false => vec![true, false],
-        };
-        for use_auth in attempts {
-            for client in STREAM_CLIENTS {
-                match self.formats_with(video_id, client, use_auth).await {
-                    Ok(formats) => {
-                        if let Some(format) = pick(formats) {
-                            return Ok(format);
-                        }
-                        last_error = Some(anyhow::anyhow!(
-                            "no direct audio format from {}",
-                            client.name()
-                        ));
-                    }
-                    Err(error) => {
-                        log::debug!(
-                            "player: {} (auth {}) failed for {video_id}: {error:#}",
-                            client.name(),
-                            use_auth,
-                        );
-                        last_error = Some(error);
-                    }
-                }
-            }
-        }
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no stream clients configured")))
-            .with_context(|| format!("cannot resolve audio stream for {video_id}"))
-    }
-
-    async fn formats_with(
-        &self,
-        video_id: &str,
-        client: Client,
-        use_auth: bool,
-    ) -> Result<Vec<AudioFormat>> {
-        let response = self
-            .player_response_with(video_id, client, use_auth)
-            .await?;
+        let response = self.stream_player(video_id).await?;
         let playability = playability(&response);
         if !playability.ok() {
             bail!(
@@ -119,10 +61,77 @@ impl YtMusic {
             .context("player response has no adaptive formats")?;
         let mut audio: Vec<AudioFormat> = formats
             .iter()
-            .filter_map(|format| audio_format(format, client))
+            .filter_map(|format| audio_format(format, Client::AndroidVr))
             .collect();
         audio.sort_by_key(|format| std::cmp::Reverse(format.bitrate));
-        Ok(audio)
+        pick(audio).with_context(|| format!("no direct audio stream for {video_id}"))
+    }
+
+    async fn stream_player(&self, video_id: &str) -> Result<Value> {
+        let primed = self.stream_visitor().await;
+        let response = self.stream_request(video_id, primed.as_deref()).await?;
+        if playability(&response).status != "LOGIN_REQUIRED" {
+            return Ok(response);
+        }
+        let Some(issued) = response
+            .pointer("/responseContext/visitorData")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            return Ok(response);
+        };
+        log::debug!("player: primed a server-issued visitor for streaming");
+        self.set_stream_visitor(issued.clone()).await;
+        self.stream_request(video_id, Some(&issued)).await
+    }
+
+    async fn stream_request(&self, video_id: &str, visitor: Option<&str>) -> Result<Value> {
+        let mut client = json!({
+            "clientName": "ANDROID_VR",
+            "clientVersion": "1.65.10",
+            "deviceMake": "Oculus",
+            "deviceModel": "Quest 3",
+            "androidSdkVersion": 32,
+            "userAgent": VR_UA,
+            "osName": "Android",
+            "osVersion": "12L",
+            "hl": self.lang(),
+            "gl": self.region(),
+            "timeZone": "UTC",
+            "utcOffsetMinutes": 0,
+        });
+        if let Some(visitor) = visitor {
+            client["visitorData"] = json!(visitor);
+        }
+        let body = json!({
+            "context": { "client": client },
+            "videoId": video_id,
+            "playbackContext": {
+                "contentPlaybackContext": { "html5Preference": "HTML5_PREF_WANTS" }
+            },
+            "contentCheckOk": true,
+            "racyCheckOk": true,
+        });
+        let mut request = self
+            .client()
+            .post(PLAYER_URL)
+            .header("User-Agent", VR_UA)
+            .header("Content-Type", "application/json")
+            .header("Origin", "https://www.youtube.com")
+            .header("X-Youtube-Client-Name", "28")
+            .header("X-Youtube-Client-Version", "1.65.10")
+            .json(&body);
+        if let Some(visitor) = visitor {
+            request = request.header("X-Goog-Visitor-Id", visitor);
+        }
+        let response = request.send().await.context("cannot reach player")?;
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .await
+            .context("cannot read player response")?;
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("player returned non-json response with status {status}"))
     }
 
     pub async fn download(&self, format: &AudioFormat) -> Result<Vec<u8>> {

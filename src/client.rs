@@ -13,6 +13,7 @@ const MUSIC_API_BASE: &str = "https://music.youtube.com/youtubei/v1/";
 pub struct YtMusic {
     pub(crate) http: reqwest::Client,
     visitor: String,
+    stream_visitor: RwLock<Option<String>>,
     tokens: Option<RwLock<Tokens>>,
     cookies: Option<String>,
     persist: Option<PathBuf>,
@@ -39,6 +40,7 @@ impl YtMusic {
         Self {
             http: reqwest::Client::new(),
             visitor: generate_visitor_data(),
+            stream_visitor: RwLock::new(None),
             tokens: None,
             cookies: None,
             persist: None,
@@ -163,6 +165,34 @@ impl YtMusic {
 
     pub fn is_cookie_auth(&self) -> bool {
         self.cookies.is_some()
+    }
+
+    pub fn visitor(&self) -> &str {
+        &self.visitor
+    }
+
+    pub fn client(&self) -> &reqwest::Client {
+        &self.http
+    }
+
+    pub(crate) async fn stream_visitor(&self) -> Option<String> {
+        self.stream_visitor.read().await.clone()
+    }
+
+    pub(crate) async fn set_stream_visitor(&self, visitor: String) {
+        *self.stream_visitor.write().await = Some(visitor);
+    }
+
+    pub fn lang(&self) -> &str {
+        &self.hl
+    }
+
+    pub fn region(&self) -> &str {
+        &self.gl
+    }
+
+    pub fn set_visitor(&mut self, visitor: impl Into<String>) {
+        self.visitor = visitor.into();
     }
 
     async fn bearer(&self) -> Result<Option<String>> {
