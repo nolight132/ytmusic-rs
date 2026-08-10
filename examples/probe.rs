@@ -168,6 +168,130 @@ async fn main() -> anyhow::Result<()> {
                 println!("{:40} {}", playlist.id, playlist.title);
             }
         }
+        "suite" => {
+            let mut results: Vec<(&str, String)> = Vec::new();
+            let pause = || tokio::time::sleep(std::time::Duration::from_secs(3));
+
+            let search = api.search_songs("daft punk get lucky").await;
+            let track_id = search
+                .as_ref()
+                .ok()
+                .and_then(|tracks| tracks.first())
+                .and_then(|track| track.video_id.clone());
+            results.push(("search", verdict(search.as_ref().map(Vec::len))));
+            pause().await;
+
+            let album = api.album("MPREb_K8qWMWVqXGi").await;
+            results.push((
+                "album",
+                verdict(album.as_ref().map(|detail| detail.tracks.len())),
+            ));
+            pause().await;
+
+            let artist = api.artist("UCRr1xG_2WIDs18a6cIiCxeA").await;
+            results.push((
+                "artist",
+                verdict(artist.as_ref().map(|artist| artist.top_tracks.len())),
+            ));
+            pause().await;
+
+            let radio = api.track_radio("4D7u5KF7SP8").await;
+            results.push(("radio", verdict(radio.as_ref().map(Vec::len))));
+            pause().await;
+
+            let stream = api.best_audio("4D7u5KF7SP8").await;
+            match &stream {
+                Ok(format) => {
+                    let data = api.download(format).await;
+                    results.push(("stream+download", verdict(data.as_ref().map(Vec::len))));
+                }
+                Err(error) => results.push(("stream+download", format!("FAIL {error:#}"))),
+            }
+            pause().await;
+
+            let profile = api.profile().await;
+            results.push((
+                "profile",
+                verdict(profile.as_ref().map(|profile| profile.name.len())),
+            ));
+            pause().await;
+
+            let liked = api.liked_songs().await;
+            results.push(("liked songs", verdict(liked.as_ref().map(Vec::len))));
+            pause().await;
+
+            let albums = api.library_albums().await;
+            results.push(("library albums", verdict(albums.as_ref().map(Vec::len))));
+            pause().await;
+
+            let playlists = api.library_playlists().await;
+            results.push((
+                "library playlists",
+                verdict(playlists.as_ref().map(Vec::len)),
+            ));
+            pause().await;
+
+            match api.create_playlist("sonora test suite").await {
+                Ok(playlist_id) => {
+                    results.push(("playlist create", format!("OK {playlist_id}")));
+                    pause().await;
+                    let rename = api
+                        .rename_playlist(&playlist_id, "sonora test renamed")
+                        .await;
+                    results.push(("playlist rename", verdict(rename.as_ref().map(|_| 0))));
+                    pause().await;
+                    if let Some(track_id) = &track_id {
+                        let add = api.add_playlist_track(&playlist_id, track_id).await;
+                        results.push(("playlist add track", verdict(add.as_ref().map(|_| 0))));
+                        pause().await;
+                        let detail = api.playlist(&playlist_id).await;
+                        let set_video_id = detail
+                            .as_ref()
+                            .ok()
+                            .and_then(|detail| detail.tracks.first())
+                            .and_then(|track| track.set_video_id.clone());
+                        results.push((
+                            "playlist read back",
+                            verdict(detail.as_ref().map(|detail| detail.tracks.len())),
+                        ));
+                        pause().await;
+                        match set_video_id {
+                            Some(set_video_id) => {
+                                let removed = api
+                                    .remove_playlist_track(&playlist_id, track_id, &set_video_id)
+                                    .await;
+                                results.push((
+                                    "playlist remove track",
+                                    verdict(removed.as_ref().map(|_| 0)),
+                                ));
+                            }
+                            None => results
+                                .push(("playlist remove track", "SKIP no setVideoId".to_string())),
+                        }
+                        pause().await;
+                        let like = api.rate_track(track_id, true).await;
+                        results.push(("like track", verdict(like.as_ref().map(|_| 0))));
+                        pause().await;
+                        let unlike = api.rate_track(track_id, false).await;
+                        results.push(("unlike track", verdict(unlike.as_ref().map(|_| 0))));
+                        pause().await;
+                    }
+                    let deleted = api.delete_playlist(&playlist_id).await;
+                    results.push(("playlist delete", verdict(deleted.as_ref().map(|_| 0))));
+                }
+                Err(error) => results.push(("playlist create", format!("FAIL {error:#}"))),
+            }
+
+            println!();
+            for (name, result) in &results {
+                println!("{name:22} {result}");
+            }
+            let failed = results
+                .iter()
+                .filter(|(_, r)| r.starts_with("FAIL"))
+                .count();
+            println!("\n{} checks, {} failed", results.len(), failed);
+        }
         "matrix" => {
             let clients = [
                 ("music", ytmusic::Client::Music),
@@ -299,6 +423,13 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn verdict<T: std::fmt::Display, E: std::fmt::Display>(result: Result<T, &E>) -> String {
+    match result {
+        Ok(value) => format!("OK {value}"),
+        Err(error) => format!("FAIL {error}"),
+    }
 }
 
 fn truncate(text: &str, max: usize) -> String {
