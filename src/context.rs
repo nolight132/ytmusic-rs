@@ -10,6 +10,7 @@ const ID_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxy
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Client {
     Music,
+    AndroidMusic,
     Tv,
     Ios,
     Android,
@@ -20,6 +21,7 @@ impl Client {
     pub fn name(self) -> &'static str {
         match self {
             Self::Music => "WEB_REMIX",
+            Self::AndroidMusic => "ANDROID_MUSIC",
             Self::Tv => "TVHTML5",
             Self::Ios => "IOS",
             Self::Android => "ANDROID",
@@ -30,6 +32,7 @@ impl Client {
     pub fn version(self) -> &'static str {
         match self {
             Self::Music => "1.20250219.01.00",
+            Self::AndroidMusic => "5.34.51",
             Self::Tv => "7.20260311.12.00",
             Self::Ios => "20.11.6",
             Self::Android => "21.03.36",
@@ -40,6 +43,7 @@ impl Client {
     pub fn id(self) -> u32 {
         match self {
             Self::Music => 67,
+            Self::AndroidMusic => 21,
             Self::Tv => 7,
             Self::Ios => 5,
             Self::Android => 3,
@@ -50,6 +54,9 @@ impl Client {
     pub fn user_agent(self) -> &'static str {
         match self {
             Self::Music => DESKTOP_UA,
+            Self::AndroidMusic => {
+                "com.google.android.apps.youtube.music/5.34.51 (Linux; U; Android 11) gzip"
+            }
             Self::Tv => "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
             Self::Ios => {
                 "com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)"
@@ -100,6 +107,12 @@ impl Client {
                 "osVersion": "16",
                 "platform": "MOBILE",
             }),
+            Self::AndroidMusic => json!({
+                "androidSdkVersion": 30,
+                "osName": "Android",
+                "osVersion": "11",
+                "platform": "MOBILE",
+            }),
             Self::AndroidVr => json!({
                 "androidSdkVersion": 32,
                 "deviceMake": "Oculus",
@@ -110,6 +123,11 @@ impl Client {
             }),
         };
         merge(&mut client, extra);
+        if visitor_data.is_empty()
+            && let Some(map) = client.as_object_mut()
+        {
+            map.remove("visitorData");
+        }
         json!({
             "client": client,
             "user": { "enableSafetyMode": false, "lockedSafetyMode": false },

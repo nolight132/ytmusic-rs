@@ -25,7 +25,17 @@ impl Playability {
 
 impl YtMusic {
     pub async fn player_response(&self, video_id: &str, client: Client) -> Result<Value> {
-        self.execute(
+        self.player_response_with(video_id, client, !self.is_cookie_auth())
+            .await
+    }
+
+    pub async fn player_response_with(
+        &self,
+        video_id: &str,
+        client: Client,
+        use_auth: bool,
+    ) -> Result<Value> {
+        self.execute_with(
             "player",
             client,
             json!({
@@ -41,12 +51,58 @@ impl YtMusic {
                     }
                 },
             }),
+            use_auth,
         )
         .await
     }
 
     pub async fn audio_formats(&self, video_id: &str, client: Client) -> Result<Vec<AudioFormat>> {
-        let response = self.player_response(video_id, client).await?;
+        self.formats_with(video_id, client, !self.is_cookie_auth())
+            .await
+    }
+
+    pub async fn best_audio(&self, video_id: &str) -> Result<AudioFormat> {
+        let mut last_error = None;
+        let attempts = match self.is_cookie_auth() {
+            true => vec![false],
+            false => vec![true, false],
+        };
+        for use_auth in attempts {
+            for client in STREAM_CLIENTS {
+                match self.formats_with(video_id, client, use_auth).await {
+                    Ok(formats) => {
+                        if let Some(format) = pick(formats) {
+                            return Ok(format);
+                        }
+                        last_error = Some(anyhow::anyhow!(
+                            "no direct audio format from {}",
+                            client.name()
+                        ));
+                    }
+                    Err(error) => {
+                        log::debug!(
+                            "player: {} (auth {}) failed for {video_id}: {error:#}",
+                            client.name(),
+                            use_auth,
+                        );
+                        last_error = Some(error);
+                    }
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no stream clients configured")))
+            .with_context(|| format!("cannot resolve audio stream for {video_id}"))
+    }
+
+    async fn formats_with(
+        &self,
+        video_id: &str,
+        client: Client,
+        use_auth: bool,
+    ) -> Result<Vec<AudioFormat>> {
+        let response = self
+            .player_response_with(video_id, client, use_auth)
+            .await?;
         let playability = playability(&response);
         if !playability.ok() {
             bail!(
@@ -67,29 +123,6 @@ impl YtMusic {
             .collect();
         audio.sort_by_key(|format| std::cmp::Reverse(format.bitrate));
         Ok(audio)
-    }
-
-    pub async fn best_audio(&self, video_id: &str) -> Result<AudioFormat> {
-        let mut last_error = None;
-        for client in STREAM_CLIENTS {
-            match self.audio_formats(video_id, client).await {
-                Ok(formats) => {
-                    if let Some(format) = pick(formats) {
-                        return Ok(format);
-                    }
-                    last_error = Some(anyhow::anyhow!(
-                        "no direct audio format from {}",
-                        client.name()
-                    ));
-                }
-                Err(error) => {
-                    log::debug!("player: {} failed for {video_id}: {error:#}", client.name());
-                    last_error = Some(error);
-                }
-            }
-        }
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no stream clients configured")))
-            .with_context(|| format!("cannot resolve audio stream for {video_id}"))
     }
 
     pub async fn download(&self, format: &AudioFormat) -> Result<Vec<u8>> {

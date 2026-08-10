@@ -9,6 +9,12 @@ fn token_path() -> PathBuf {
 }
 
 fn client() -> YtMusic {
+    if let Some(path) = std::env::var_os("YTMUSIC_COOKIES")
+        && let Ok(cookies) = std::fs::read_to_string(path)
+    {
+        eprintln!("probe: using cookie auth");
+        return YtMusic::with_cookies(cookies.trim());
+    }
     match ytmusic::Tokens::load(&token_path()) {
         Ok(Some(tokens)) => {
             eprintln!("probe: using tokens from {}", token_path().display());
@@ -161,6 +167,125 @@ async fn main() -> anyhow::Result<()> {
             for playlist in api.library_playlists().await? {
                 println!("{:40} {}", playlist.id, playlist.title);
             }
+        }
+        "matrix" => {
+            let clients = [
+                ("music", ytmusic::Client::Music),
+                ("androidmusic", ytmusic::Client::AndroidMusic),
+                ("tv", ytmusic::Client::Tv),
+                ("ios", ytmusic::Client::Ios),
+            ];
+            for (label, client) in clients {
+                let search = api
+                    .execute(
+                        "search",
+                        client,
+                        serde_json::json!({ "query": "daft punk" }),
+                    )
+                    .await
+                    .map(|_| "OK")
+                    .unwrap_or("FAIL");
+                let album = api
+                    .execute(
+                        "browse",
+                        client,
+                        serde_json::json!({ "browseId": "MPREb_K8qWMWVqXGi" }),
+                    )
+                    .await
+                    .map(|_| "OK")
+                    .unwrap_or("FAIL");
+                let liked = api
+                    .execute(
+                        "browse",
+                        client,
+                        serde_json::json!({ "browseId": "FEmusic_liked_playlists" }),
+                    )
+                    .await
+                    .map(|_| "OK")
+                    .unwrap_or("FAIL");
+                println!("{label:14} search={search} album={album} library={liked}");
+            }
+        }
+        "authcheck" => {
+            for (label, client) in [
+                ("tv", ytmusic::Client::Tv),
+                ("androidvr", ytmusic::Client::AndroidVr),
+                ("ios", ytmusic::Client::Ios),
+            ] {
+                let player = match api.player_response("4D7u5KF7SP8", client).await {
+                    Ok(response) => {
+                        let status = response["playabilityStatus"]["status"]
+                            .as_str()
+                            .unwrap_or("?")
+                            .to_string();
+                        let direct = response["streamingData"]["adaptiveFormats"]
+                            .as_array()
+                            .map(|formats| {
+                                formats.iter().filter(|f| f.get("url").is_some()).count()
+                            })
+                            .unwrap_or(0);
+                        format!("{status}, {direct} direct formats")
+                    }
+                    Err(error) => format!("ERR {error}"),
+                };
+                println!("player via {label}: {player}");
+            }
+            let created = api
+                .execute(
+                    "playlist/create",
+                    ytmusic::Client::Tv,
+                    serde_json::json!({ "title": "sonora probe", "privacyStatus": "PRIVATE" }),
+                )
+                .await;
+            match created {
+                Ok(response) => {
+                    let id = response["playlistId"].as_str().unwrap_or("").to_string();
+                    println!("playlist/create via tv: OK {id}");
+                    let deleted = api
+                        .execute(
+                            "playlist/delete",
+                            ytmusic::Client::Tv,
+                            serde_json::json!({ "playlistId": id }),
+                        )
+                        .await;
+                    println!(
+                        "playlist/delete via tv: {}",
+                        match deleted {
+                            Ok(_) => "OK".to_string(),
+                            Err(error) => format!("ERR {error}"),
+                        }
+                    );
+                }
+                Err(error) => println!("playlist/create via tv: ERR {error}"),
+            }
+            let albums = api
+                .execute(
+                    "browse",
+                    ytmusic::Client::Tv,
+                    serde_json::json!({ "browseId": "FEmusic_liked_albums" }),
+                )
+                .await
+                .map(|response| response.to_string().len())
+                .map(|size| format!("OK {size} bytes"))
+                .unwrap_or_else(|error| format!("ERR {error}"));
+            println!("browse liked albums via tv: {albums}");
+        }
+        "rawbrowse" => {
+            let client = match std::env::args().nth(3).as_deref() {
+                Some("tv") => ytmusic::Client::Tv,
+                Some("androidmusic") => ytmusic::Client::AndroidMusic,
+                Some("ios") => ytmusic::Client::Ios,
+                _ => ytmusic::Client::Music,
+            };
+            let response = api
+                .execute(
+                    "browse",
+                    client,
+                    serde_json::json!({ "browseId": argument }),
+                )
+                .await?;
+            let text = response.to_string();
+            println!("{}", &text[..text.len().min(2000)]);
         }
         "profile" => {
             let profile = api.profile().await?;
