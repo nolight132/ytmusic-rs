@@ -9,6 +9,17 @@ fn token_path() -> PathBuf {
 }
 
 fn client() -> YtMusic {
+    if let Some(name) = std::env::var_os("YTMUSIC_BROWSER") {
+        let name = name.to_string_lossy();
+        if let Some(browser) = ytmusic::browser::detect()
+            .into_iter()
+            .find(|b| b.name.eq_ignore_ascii_case(&name))
+            && let Ok(cookie) = ytmusic::browser::cookies(&browser)
+        {
+            eprintln!("probe: using {} cookies", browser.name);
+            return YtMusic::with_cookies(cookie);
+        }
+    }
     if let Some(path) = std::env::var_os("YTMUSIC_COOKIES")
         && let Ok(cookies) = std::fs::read_to_string(path)
     {
@@ -143,6 +154,26 @@ async fn main() -> anyhow::Result<()> {
         "profile" => {
             let profile = api.profile().await?;
             println!("{} ({:?})", profile.name, profile.email);
+        }
+        "browsers" => {
+            for browser in ytmusic::browser::detect() {
+                match ytmusic::browser::cookies(&browser) {
+                    Ok(cookie) => println!(
+                        "{:10} {:?}  ->  {} chars, SAPISID={}",
+                        browser.name,
+                        browser.family,
+                        cookie.len(),
+                        cookie.contains("SAPISID=")
+                    ),
+                    Err(error) => {
+                        println!("{:10} {:?}  ->  {error}", browser.name, browser.family)
+                    }
+                }
+            }
+        }
+        "delete" => {
+            api.delete_playlist(&argument).await?;
+            println!("deleted {argument}");
         }
         "suite" => run_suite(&api).await,
         other => {
