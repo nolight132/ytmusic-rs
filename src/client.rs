@@ -87,10 +87,13 @@ impl YtMusic {
             .await
             .with_context(|| format!("cannot reach {endpoint}"))?;
         let status = response.status();
-        let value: Value = response
-            .json()
+        let body = response
+            .bytes()
             .await
-            .with_context(|| format!("cannot parse {endpoint} response"))?;
+            .with_context(|| format!("cannot read {endpoint} response"))?;
+        let Ok(value) = serde_json::from_slice::<Value>(&body) else {
+            bail!("{endpoint} returned non-json response with status {status}");
+        };
         if let Some(error) = value.get("error") {
             let message = error
                 .get("message")
