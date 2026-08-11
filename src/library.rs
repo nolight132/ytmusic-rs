@@ -3,6 +3,7 @@ use serde_json::json;
 
 use crate::client::YtMusic;
 use crate::context::Client;
+use crate::dedup;
 use crate::models::{Album, Playlist, Profile, Track};
 use crate::nav::Nav as _;
 use crate::parse;
@@ -10,11 +11,61 @@ use crate::parse;
 pub const LIKED_SONGS: &str = "LM";
 const LIBRARY_ALBUMS: &str = "FEmusic_liked_albums";
 const LIBRARY_PLAYLISTS: &str = "FEmusic_liked_playlists";
+const RESOLVE_CONCURRENCY: usize = 6;
 
 impl YtMusic {
     pub async fn liked_songs(&self) -> Result<Vec<Track>> {
         let detail = self.playlist(LIKED_SONGS).await?;
-        Ok(detail.tracks)
+        Ok(dedup::collapse(detail.tracks))
+    }
+
+    pub async fn resolve_song(&self, track: &Track) -> Result<Option<Track>> {
+        if !track.is_video() {
+            return Ok(None);
+        }
+        let query = dedup::search_query(track);
+        let candidates = self.search_songs(&query).await?;
+        Ok(dedup::best_song_match(track, candidates))
+    }
+
+    pub async fn liked_songs_resolved(self: &std::sync::Arc<Self>) -> Result<Vec<Track>> {
+        let raw = self.liked_songs().await?;
+        let resolved = self.resolve_videos(raw).await;
+        Ok(dedup::collapse(resolved))
+    }
+
+    pub async fn resolve_videos(self: &std::sync::Arc<Self>, tracks: Vec<Track>) -> Vec<Track> {
+        use tokio::sync::Semaphore;
+        let limit = std::sync::Arc::new(Semaphore::new(RESOLVE_CONCURRENCY));
+        let mut tasks = tokio::task::JoinSet::new();
+        for (index, track) in tracks.into_iter().enumerate() {
+            let api = self.clone();
+            let limit = limit.clone();
+            tasks.spawn(async move {
+                if !track.is_video() {
+                    return (index, track);
+                }
+                let Some(video_id) = track.video_id.clone() else {
+                    return (index, track);
+                };
+                if let Some(cached) = api.resolve_cache.get(&video_id).await {
+                    return (index, cached.unwrap_or(track));
+                }
+                let _permit = limit.acquire().await;
+                let resolved = api.resolve_song(&track).await.ok().flatten();
+                api.resolve_cache.put(video_id, resolved.clone()).await;
+                (index, resolved.unwrap_or(track))
+            });
+        }
+        let mut resolved: Vec<(usize, Track)> = Vec::new();
+        while let Some(result) = tasks.join_next().await {
+            if let Ok(pair) = result {
+                resolved.push(pair);
+            }
+        }
+        self.resolve_cache.flush().await;
+        resolved.sort_by_key(|(index, _)| *index);
+        resolved.into_iter().map(|(_, track)| track).collect()
     }
 
     pub async fn library_albums(&self) -> Result<Vec<Album>> {

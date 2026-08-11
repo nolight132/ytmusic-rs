@@ -17,6 +17,7 @@ pub struct YtMusic {
     tokens: Option<RwLock<Tokens>>,
     cookies: Option<String>,
     persist: Option<PathBuf>,
+    pub(crate) resolve_cache: crate::dedup::ResolveCache,
     hl: String,
     gl: String,
 }
@@ -44,6 +45,7 @@ impl YtMusic {
             tokens: None,
             cookies: None,
             persist: None,
+            resolve_cache: crate::dedup::ResolveCache::memory(),
             hl: "en".to_string(),
             gl: "US".to_string(),
         }
@@ -51,6 +53,11 @@ impl YtMusic {
 
     pub fn persist_to(mut self, path: PathBuf) -> Self {
         self.persist = Some(path);
+        self
+    }
+
+    pub fn cache_resolutions(mut self, path: PathBuf) -> Self {
+        self.resolve_cache = crate::dedup::ResolveCache::disk(path);
         self
     }
 

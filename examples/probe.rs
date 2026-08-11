@@ -171,6 +171,79 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        "lmdump" => {
+            let response = api
+                .execute(
+                    "browse",
+                    ytmusic::Client::Music,
+                    serde_json::json!({"browseId":"VLLM"}),
+                )
+                .await?;
+            let mut found = Vec::new();
+            ytmusic::nav::find_all(&response, "musicResponsiveListItemRenderer", &mut found);
+            if let Some(item) = found.get(argument.parse::<usize>().unwrap_or(1)) {
+                println!("{}", serde_json::to_string_pretty(item)?);
+            }
+        }
+        "resolveall" => {
+            let api = std::sync::Arc::new(client());
+            let raw = api.liked_songs().await?;
+            let videos_before = raw.iter().filter(|t| t.is_video()).count();
+            let resolved = api.liked_songs_resolved().await?;
+            let videos_after = resolved.iter().filter(|t| t.is_video()).count();
+            let with_album = resolved.iter().filter(|t| t.album.is_some()).count();
+            println!(
+                "before: {} tracks, {} videos\nafter:  {} tracks, {} videos, {} with album",
+                raw.len(),
+                videos_before,
+                resolved.len(),
+                videos_after,
+                with_album,
+            );
+        }
+        "resolve" => {
+            let raw = api.playlist("LM").await?.tracks;
+            let videos: Vec<_> = raw.into_iter().filter(|t| t.is_video()).take(8).collect();
+            for video in &videos {
+                let resolved = api.resolve_song(video).await?;
+                match resolved {
+                    Some(song) => println!(
+                        "VIDEO {} — {}\n  -> SONG {} — {} [{}]",
+                        truncate(&video.title, 45),
+                        artist_names(&video.artists),
+                        truncate(&song.title, 45),
+                        artist_names(&song.artists),
+                        song.album.as_ref().map(|a| a.name.as_str()).unwrap_or("-"),
+                    ),
+                    None => println!(
+                        "VIDEO {} — {}\n  -> no song match",
+                        truncate(&video.title, 45),
+                        artist_names(&video.artists),
+                    ),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+        "likedraw" => {
+            let raw = api.playlist("LM").await?.tracks;
+            let deduped = ytmusic::dedup::collapse(raw.clone());
+            let videos = raw.iter().filter(|t| t.is_video()).count();
+            println!(
+                "raw={} deduped={} removed={} videos_in_raw={}",
+                raw.len(),
+                deduped.len(),
+                raw.len() - deduped.len(),
+                videos
+            );
+            for track in raw.iter().filter(|t| t.is_video()) {
+                println!(
+                    "  VIDEO {:14} {} — {}",
+                    track.video_id.clone().unwrap_or_default(),
+                    truncate(&track.title, 40),
+                    artist_names(&track.artists),
+                );
+            }
+        }
         "delete" => {
             api.delete_playlist(&argument).await?;
             println!("deleted {argument}");

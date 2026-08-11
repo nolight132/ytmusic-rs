@@ -2,6 +2,7 @@ pub mod browse;
 pub mod browser;
 pub mod client;
 pub mod context;
+pub mod dedup;
 pub mod library;
 pub mod models;
 pub mod mutate;

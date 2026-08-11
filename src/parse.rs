@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::models::{Album, AlbumKind, AlbumRef, ArtistRef, Playlist, Thumbnail, Track};
+use crate::models::{Album, AlbumKind, AlbumRef, ArtistRef, Playlist, Thumbnail, Track, TrackKind};
 use crate::nav::{Nav as _, find_all};
 use crate::util::{parse_clock, parse_year};
 
@@ -154,6 +154,7 @@ pub fn list_item_track(item: &Value) -> Option<Track> {
         .as_deref()
         .and_then(parse_clock);
     let unavailable = renderer.str_at(&["musicItemRendererDisplayPolicy"]) == Some(GREY_OUT);
+    let kind = track_kind(first, album.is_some());
     Some(Track {
         available: video_id.is_some() && !unavailable,
         video_id,
@@ -163,12 +164,34 @@ pub fn list_item_track(item: &Value) -> Option<Track> {
         duration,
         thumbnails: thumbnails(renderer),
         explicit: explicit(renderer),
+        kind,
         set_video_id: renderer
             .str_at(&["playlistItemData", "playlistSetVideoId"])
             .map(str::to_string),
         liked: None,
         views: None,
     })
+}
+
+fn track_kind(first_column: &Value, has_album: bool) -> TrackKind {
+    let video_type = first_column.str_at(&[
+        "text",
+        "runs",
+        "0",
+        "navigationEndpoint",
+        "watchEndpoint",
+        "watchEndpointMusicSupportedConfigs",
+        "watchEndpointMusicConfig",
+        "musicVideoType",
+    ]);
+    match video_type {
+        Some("MUSIC_VIDEO_TYPE_ATV") => TrackKind::Song,
+        Some(_) => TrackKind::Video,
+        None => match has_album {
+            true => TrackKind::Song,
+            false => TrackKind::Video,
+        },
+    }
 }
 
 pub fn panel_track(item: &Value) -> Option<Track> {
@@ -201,10 +224,25 @@ pub fn panel_track(item: &Value) -> Option<Track> {
             .and_then(parse_clock),
         thumbnails: thumbnails(renderer),
         explicit: explicit(renderer),
+        kind: panel_kind(renderer),
         set_video_id: renderer.str_at(&["playlistSetVideoId"]).map(str::to_string),
         liked: None,
         views: None,
     })
+}
+
+fn panel_kind(renderer: &Value) -> TrackKind {
+    let video_type = renderer.str_at(&[
+        "navigationEndpoint",
+        "watchEndpoint",
+        "watchEndpointMusicSupportedConfigs",
+        "watchEndpointMusicConfig",
+        "musicVideoType",
+    ]);
+    match video_type {
+        Some("MUSIC_VIDEO_TYPE_ATV") | None => TrackKind::Song,
+        Some(_) => TrackKind::Video,
+    }
 }
 
 pub fn two_row_album(item: &Value) -> Option<Album> {

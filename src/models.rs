@@ -1,25 +1,32 @@
 use std::time::Duration;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Thumbnail {
     pub url: String,
     pub width: u32,
     pub height: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArtistRef {
     pub name: String,
     pub id: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AlbumRef {
     pub name: String,
     pub id: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TrackKind {
+    #[default]
+    Song,
+    Video,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Track {
     pub video_id: Option<String>,
     pub title: String,
@@ -29,12 +36,19 @@ pub struct Track {
     pub thumbnails: Vec<Thumbnail>,
     pub explicit: bool,
     pub available: bool,
+    pub kind: TrackKind,
     pub set_video_id: Option<String>,
     pub liked: Option<bool>,
     pub views: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+impl Track {
+    pub fn is_video(&self) -> bool {
+        matches!(self.kind, TrackKind::Video)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AlbumKind {
     Album,
     Single,
@@ -42,7 +56,7 @@ pub enum AlbumKind {
     Compilation,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Album {
     pub browse_id: String,
     pub playlist_id: Option<String>,
@@ -54,7 +68,7 @@ pub struct Album {
     pub thumbnails: Vec<Thumbnail>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AlbumDetail {
     pub album: Album,
     pub description: Option<String>,
@@ -62,7 +76,7 @@ pub struct AlbumDetail {
     pub tracks: Vec<Track>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Playlist {
     pub id: String,
     pub title: String,
@@ -72,14 +86,14 @@ pub struct Playlist {
     pub thumbnails: Vec<Thumbnail>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlaylistDetail {
     pub playlist: Playlist,
     pub public: bool,
     pub tracks: Vec<Track>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Artist {
     pub browse_id: String,
     pub name: String,
@@ -91,7 +105,7 @@ pub struct Artist {
     pub singles: Vec<Album>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Profile {
     pub name: String,
     pub email: Option<String>,
