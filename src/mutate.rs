@@ -81,7 +81,11 @@ impl YtMusic {
     pub async fn add_playlist_track(&self, playlist_id: &str, video_id: &str) -> Result<()> {
         self.edit_playlist(
             playlist_id,
-            json!([{ "action": "ACTION_ADD_VIDEO", "addedVideoId": video_id }]),
+            json!([{
+                "action": "ACTION_ADD_VIDEO",
+                "addedVideoId": video_id,
+                "dedupeOption": "DEDUPE_OPTION_SKIP",
+            }]),
         )
         .await
     }
