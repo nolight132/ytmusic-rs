@@ -151,7 +151,10 @@ async fn main() -> anyhow::Result<()> {
         }
         "playlists" => {
             for playlist in api.library_playlists().await? {
-                println!("{:40} {}", playlist.id, playlist.title);
+                println!(
+                    "{:20} owned={:5} public={:?} {}",
+                    playlist.id, playlist.owned, playlist.public, playlist.title
+                );
             }
         }
         "profile" => {
@@ -264,6 +267,23 @@ async fn main() -> anyhow::Result<()> {
         "delete" => {
             api.delete_playlist(&argument).await?;
             println!("deleted {argument}");
+        }
+        "create" => {
+            let id = api.create_playlist(&argument).await?;
+            println!("created {id}");
+        }
+        "rename" => {
+            let title = std::env::args().nth(3).unwrap_or_default();
+            api.rename_playlist(&argument, &title).await?;
+            println!("renamed {argument} to {title}");
+        }
+        "raw" => {
+            let payload: serde_json::Value =
+                serde_json::from_str(&std::env::args().nth(3).unwrap_or_else(|| "{}".into()))?;
+            let response = api
+                .execute(&argument, ytmusic::Client::Music, payload)
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
         }
         "suite" => run_suite(&api).await,
         other => {

@@ -82,6 +82,7 @@ pub struct Playlist {
     pub title: String,
     pub author: Option<String>,
     pub owned: bool,
+    pub public: Option<bool>,
     pub track_count: Option<u32>,
     pub thumbnails: Vec<Thumbnail>,
 }

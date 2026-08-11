@@ -321,17 +321,21 @@ pub fn two_row_playlist(item: &Value) -> Option<Playlist> {
     }
     let title = renderer.run_text(&["title"])?;
     let subtitle_runs = renderer.runs(&["subtitle"]);
-    let author = subtitle_runs
-        .iter()
-        .filter_map(|run| run.str_at(&["text"]))
-        .find(|text| {
-            !matches!(*text, " • " | ", ")
-                && !text.starts_with("Playlist")
-                && !text.contains("view")
-                && !text.contains("song")
-                && !text.contains("track")
-        })
-        .map(str::to_string);
+    let owned = has_icon(renderer, "DELETE");
+    let author = match owned {
+        true => None,
+        false => subtitle_runs
+            .iter()
+            .filter_map(|run| run.str_at(&["text"]))
+            .find(|text| {
+                !matches!(*text, " • " | ", ")
+                    && !text.starts_with("Playlist")
+                    && !text.contains("view")
+                    && !text.contains("song")
+                    && !text.contains("track")
+            })
+            .map(str::to_string),
+    };
     let track_count = subtitle_runs
         .iter()
         .filter_map(|run| run.str_at(&["text"]))
@@ -340,10 +344,27 @@ pub fn two_row_playlist(item: &Value) -> Option<Playlist> {
         id: browse_id.trim_start_matches("VL").to_string(),
         title,
         author,
-        owned: false,
+        owned,
+        public: privacy(renderer),
         track_count,
         thumbnails: thumbnails(renderer),
     })
+}
+
+fn has_icon(renderer: &Value, wanted: &str) -> bool {
+    let mut icons = Vec::new();
+    crate::nav::find_all(renderer, "iconType", &mut icons);
+    icons
+        .into_iter()
+        .filter_map(Value::as_str)
+        .any(|icon| icon == wanted)
+}
+
+fn privacy(renderer: &Value) -> Option<bool> {
+    match has_icon(renderer, "PRIVACY_PUBLIC") {
+        true => Some(true),
+        false => has_icon(renderer, "PRIVACY_PRIVATE").then_some(false),
+    }
 }
 
 pub fn count_from_text(text: &str) -> Option<u32> {

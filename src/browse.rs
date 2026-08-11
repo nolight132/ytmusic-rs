@@ -178,18 +178,21 @@ impl YtMusic {
             .or_else(|| parse::find_renderer(&response, "musicDetailHeaderRenderer"))
             .context("playlist response has no header")?;
         let title = header.run_text(&["title"]).unwrap_or_default();
-        let author = header
-            .runs(&["straplineTextOne"])
-            .iter()
-            .chain(header.runs(&["subtitle"]).iter())
-            .filter_map(|run| run.str_at(&["text"]))
-            .find(|text| {
-                !matches!(*text, " • " | ", ")
-                    && !text.starts_with("Playlist")
-                    && !text.starts_with("Album")
-                    && parse_year(text).is_none()
-            })
-            .map(str::to_string);
+        let author = match editable {
+            true => None,
+            false => header
+                .runs(&["straplineTextOne"])
+                .iter()
+                .chain(header.runs(&["subtitle"]).iter())
+                .filter_map(|run| run.str_at(&["text"]))
+                .find(|text| {
+                    !matches!(*text, " • " | ", ")
+                        && !text.starts_with("Playlist")
+                        && !text.starts_with("Album")
+                        && parse_year(text).is_none()
+                })
+                .map(str::to_string),
+        };
         let track_count = header
             .runs(&["secondSubtitle"])
             .iter()
@@ -216,6 +219,7 @@ impl YtMusic {
                 title,
                 author,
                 owned: editable,
+                public: privacy.as_deref().map(|status| status == "PUBLIC"),
                 track_count: track_count.or(Some(tracks.len() as u32)),
                 thumbnails,
             },
