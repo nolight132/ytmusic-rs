@@ -8,6 +8,7 @@ use crate::context::{Client, random_string};
 use crate::models::AudioFormat;
 
 const CHUNK: u64 = 1024 * 1024;
+const PARALLEL: usize = 4;
 const MAX_STREAM_BYTES: u64 = 256 * 1024 * 1024;
 const PLAYER_URL: &str = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false&alt=json";
 const VR_UA: &str = "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
@@ -135,42 +136,83 @@ impl YtMusic {
     }
 
     pub async fn download(&self, format: &AudioFormat) -> Result<Vec<u8>> {
-        let total = format.content_length.unwrap_or(MAX_STREAM_BYTES);
-        let mut data = Vec::with_capacity(total.min(CHUNK * 2) as usize);
+        let Some(total) = format.content_length else {
+            return self.download_serial(format).await;
+        };
+        let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(PARALLEL));
+        let mut tasks = tokio::task::JoinSet::new();
         let mut offset = 0u64;
+        let mut index = 0usize;
         while offset < total {
             let end = (offset + CHUNK - 1).min(total - 1);
-            let response = self
-                .http
-                .get(&format.url)
-                .header("Range", format!("bytes={offset}-{end}"))
-                .header("User-Agent", format.user_agent)
-                .header("Accept-Encoding", "identity")
-                .header("Origin", "https://www.youtube.com")
-                .header("Referer", "https://www.youtube.com/")
-                .send()
-                .await
-                .context("cannot reach stream host")?;
-            let status = response.status();
-            if !status.is_success() {
-                bail!(
-                    "stream host refused the download with status {status} \
-                     (a proof-of-origin token is likely required)"
-                );
-            }
-            let chunk = response.bytes().await.context("cannot read stream chunk")?;
-            if chunk.is_empty() {
-                break;
-            }
-            let done = format.content_length.is_none() && (chunk.len() as u64) < CHUNK;
+            let http = self.http.clone();
+            let url = format.url.clone();
+            let agent = format.user_agent;
+            let limit = limit.clone();
+            let start = offset;
+            tasks.spawn(async move {
+                let _permit = limit.acquire().await;
+                (index, range(&http, &url, agent, start, end).await)
+            });
+            offset = end + 1;
+            index += 1;
+        }
+        let mut parts: Vec<(usize, Vec<u8>)> = Vec::with_capacity(index);
+        while let Some(joined) = tasks.join_next().await {
+            let (index, chunk) = joined.context("download task did not finish")?;
+            parts.push((index, chunk?));
+        }
+        parts.sort_by_key(|(index, _)| *index);
+        let mut data = Vec::with_capacity(total as usize);
+        for (_, chunk) in parts {
+            data.extend_from_slice(&chunk);
+        }
+        Ok(data)
+    }
+
+    async fn download_serial(&self, format: &AudioFormat) -> Result<Vec<u8>> {
+        let mut data = Vec::with_capacity((CHUNK * 2) as usize);
+        let mut offset = 0u64;
+        while offset < MAX_STREAM_BYTES {
+            let end = offset + CHUNK - 1;
+            let chunk = range(&self.http, &format.url, format.user_agent, offset, end).await?;
+            let short = (chunk.len() as u64) < CHUNK;
             offset += chunk.len() as u64;
             data.extend_from_slice(&chunk);
-            if done {
+            if short {
                 break;
             }
         }
         Ok(data)
     }
+}
+
+async fn range(
+    http: &reqwest::Client,
+    url: &str,
+    agent: &'static str,
+    start: u64,
+    end: u64,
+) -> Result<Vec<u8>> {
+    let response = http
+        .get(url)
+        .header("Range", format!("bytes={start}-{end}"))
+        .header("User-Agent", agent)
+        .header("Accept-Encoding", "identity")
+        .header("Origin", "https://www.youtube.com")
+        .header("Referer", "https://www.youtube.com/")
+        .send()
+        .await
+        .context("cannot reach stream host")?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!(
+            "stream host refused the download with status {status} \
+             (a proof-of-origin token is likely required)"
+        );
+    }
+    let chunk = response.bytes().await.context("cannot read stream chunk")?;
+    Ok(chunk.to_vec())
 }
 
 fn pick(formats: Vec<AudioFormat>) -> Option<AudioFormat> {

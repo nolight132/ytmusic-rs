@@ -120,17 +120,20 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         "stream" => {
+            let mark = std::time::Instant::now();
             let format = api.best_audio(&argument).await?;
             println!(
-                "itag={} codec={} bitrate={} length={:?} loudness={:?}",
+                "itag={} codec={} bitrate={} length={:?} loudness={:?} resolve={:?}",
                 format.itag,
                 format.codec,
                 format.bitrate,
                 format.content_length,
-                format.loudness_db
+                format.loudness_db,
+                mark.elapsed()
             );
+            let mark = std::time::Instant::now();
             let data = api.download(&format).await?;
-            println!("downloaded {} bytes", data.len());
+            println!("downloaded {} bytes in {:?}", data.len(), mark.elapsed());
         }
         "liked" => {
             for track in api.liked_songs().await? {
