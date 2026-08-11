@@ -19,6 +19,18 @@ impl YtMusic {
         Ok(dedup::collapse(detail.tracks))
     }
 
+    pub async fn track_duration(&self, video_id: &str) -> Option<std::time::Duration> {
+        let response = self
+            .execute("next", Client::Music, json!({ "videoId": video_id }))
+            .await
+            .ok()?;
+        parse::find_renderers(&response, "playlistPanelVideoRenderer")
+            .into_iter()
+            .find_map(|renderer| renderer.run_text(&["lengthText"]))
+            .as_deref()
+            .and_then(crate::util::parse_clock)
+    }
+
     pub async fn resolve_song(&self, track: &Track) -> Result<Option<Track>> {
         if !track.is_video() {
             return Ok(None);

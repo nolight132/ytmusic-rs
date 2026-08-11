@@ -171,6 +171,20 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        "artistdump" => {
+            let response = api
+                .execute(
+                    "browse",
+                    ytmusic::Client::Music,
+                    serde_json::json!({"browseId": argument}),
+                )
+                .await?;
+            let mut found = Vec::new();
+            ytmusic::nav::find_all(&response, "musicResponsiveListItemRenderer", &mut found);
+            if let Some(item) = found.first() {
+                println!("{}", serde_json::to_string_pretty(item)?);
+            }
+        }
         "lmdump" => {
             let response = api
                 .execute(
