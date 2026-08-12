@@ -165,7 +165,7 @@ impl YtMusic {
             .execute("account/account_menu", Client::Music, json!({}))
             .await?;
         let Some(account) = parse::find_renderer(&response, "activeAccountHeaderRenderer") else {
-            log::warn!(
+            log::debug!(
                 "profile: account_menu has no active account, response: {}",
                 snippet(&response)
             );
@@ -191,7 +191,7 @@ impl YtMusic {
             .execute("account/accounts_list", Client::Tv, json!({}))
             .await?;
         let Some(account) = parse::find_renderer(&response, "accountItem") else {
-            log::warn!(
+            log::debug!(
                 "profile: accounts_list has no accountItem, response: {}",
                 snippet(&response)
             );
