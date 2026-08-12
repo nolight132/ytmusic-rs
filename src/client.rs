@@ -16,6 +16,7 @@ pub struct YtMusic {
     stream_visitor: RwLock<Option<String>>,
     tokens: Option<RwLock<Tokens>>,
     cookies: Option<String>,
+    authuser: usize,
     persist: Option<PathBuf>,
     pub(crate) resolve_cache: crate::dedup::ResolveCache,
     hl: String,
@@ -44,11 +45,17 @@ impl YtMusic {
             stream_visitor: RwLock::new(None),
             tokens: None,
             cookies: None,
+            authuser: 0,
             persist: None,
             resolve_cache: crate::dedup::ResolveCache::memory(),
             hl: "en".to_string(),
             gl: "US".to_string(),
         }
+    }
+
+    pub fn as_user(mut self, authuser: usize) -> Self {
+        self.authuser = authuser;
+        self
     }
 
     pub fn persist_to(mut self, path: PathBuf) -> Self {
@@ -128,7 +135,7 @@ impl YtMusic {
                     .header("Authorization", authorization)
                     .header("Cookie", cookies)
                     .header("X-Origin", origin)
-                    .header("X-Goog-AuthUser", "0");
+                    .header("X-Goog-AuthUser", self.authuser.to_string());
             }
             (None, Some(bearer)) => {
                 request = request.header("Authorization", format!("Bearer {bearer}"));
@@ -172,6 +179,10 @@ impl YtMusic {
 
     pub fn is_cookie_auth(&self) -> bool {
         self.cookies.is_some()
+    }
+
+    pub fn authuser(&self) -> usize {
+        self.authuser
     }
 
     pub fn visitor(&self) -> &str {
