@@ -45,6 +45,49 @@ impl YtMusic {
     }
 
     pub async fn best_audio(&self, video_id: &str) -> Result<AudioFormat> {
+        match self.direct_audio(video_id).await {
+            Ok(format) => Ok(format),
+            Err(direct) => {
+                log::debug!("player: no direct stream for {video_id} ({direct:#}), deciphering");
+                self.deciphered_audio(video_id)
+                    .await
+                    .with_context(|| format!("no direct stream either ({direct:#})"))
+            }
+        }
+    }
+
+    pub async fn load_audio(&self, video_id: &str) -> Result<(AudioFormat, Vec<u8>)> {
+        let started = std::time::Instant::now();
+        log::debug!("player: loading {video_id}, trying the direct stream first");
+        let refused = match self.direct_audio(video_id).await {
+            Ok(format) => match self.download(&format).await {
+                Ok(data) => {
+                    log::debug!(
+                        "player: {video_id} loaded direct, {} in {:?}",
+                        describe(&format, data.len()),
+                        started.elapsed()
+                    );
+                    return Ok((format, data));
+                }
+                Err(refused) => refused,
+            },
+            Err(missing) => missing,
+        };
+        log::debug!("player: the direct stream for {video_id} failed ({refused:#}), deciphering");
+        let format = self
+            .deciphered_audio(video_id)
+            .await
+            .with_context(|| format!("the direct stream failed too ({refused:#})"))?;
+        let data = self.download(&format).await?;
+        log::debug!(
+            "player: {video_id} loaded deciphered, {} in {:?}",
+            describe(&format, data.len()),
+            started.elapsed()
+        );
+        Ok((format, data))
+    }
+
+    pub async fn direct_audio(&self, video_id: &str) -> Result<AudioFormat> {
         let response = self.stream_player(video_id).await?;
         let playability = playability(&response);
         if !playability.ok() {
@@ -66,6 +109,94 @@ impl YtMusic {
             .collect();
         audio.sort_by_key(|format| std::cmp::Reverse(format.bitrate));
         pick(audio).with_context(|| format!("no direct audio stream for {video_id}"))
+    }
+
+    pub async fn deciphered_audio(&self, video_id: &str) -> Result<AudioFormat> {
+        let solver = self.solver().await?;
+        let client = match self.is_authenticated() {
+            true => Client::TvDowngraded,
+            false => Client::Tv,
+        };
+        log::debug!(
+            "player: asking {} {} for {video_id}, player {} sts {}",
+            client.name(),
+            client.version(),
+            solver.id(),
+            solver.sts()
+        );
+        let payload = json!({
+            "videoId": video_id,
+            "contentCheckOk": true,
+            "racyCheckOk": true,
+            "cpn": random_string(16),
+            "playbackContext": {
+                "contentPlaybackContext": {
+                    "html5Preference": "HTML5_PREF_WANTS",
+                    "signatureTimestamp": solver.sts(),
+                }
+            },
+        });
+        let response = self.visiting_player(client, payload).await?;
+        let playability = playability(&response);
+        if !playability.ok() {
+            bail!(
+                "{} is not playable: {} ({})",
+                video_id,
+                playability.status,
+                playability.reason.as_deref().unwrap_or("no reason")
+            );
+        }
+        let formats = response
+            .get("streamingData")
+            .and_then(|data| data.get("adaptiveFormats"))
+            .and_then(Value::as_array)
+            .context("player response has no adaptive formats")?;
+        let mut audio: Vec<Ciphered> = formats.iter().filter_map(ciphered).collect();
+        if audio.is_empty() {
+            let sabr = response
+                .pointer("/streamingData/serverAbrStreamingUrl")
+                .is_some();
+            match sabr && !self.is_authenticated() {
+                true => bail!("{video_id} is served over sabr only; sign in to stream it"),
+                false => bail!("{video_id} offers no addressable audio stream"),
+            }
+        }
+        audio.sort_by_key(|format| std::cmp::Reverse(format.bitrate));
+        let chosen = prefer_aac(audio)
+            .with_context(|| format!("no ciphered audio stream for {video_id}"))?;
+        let url = decipher(&solver, &chosen).await?;
+        Ok(AudioFormat {
+            itag: chosen.itag,
+            url,
+            mime: chosen.mime,
+            codec: chosen.codec,
+            bitrate: chosen.bitrate,
+            duration: chosen.duration,
+            content_length: chosen.content_length,
+            loudness_db: chosen.loudness_db,
+            user_agent: client.user_agent(),
+        })
+    }
+
+    async fn visiting_player(&self, client: Client, payload: Value) -> Result<Value> {
+        let primed = self.stream_visitor().await;
+        let response = self
+            .execute_visiting("player", client, payload.clone(), true, primed.as_deref())
+            .await?;
+        if playability(&response).status != "LOGIN_REQUIRED" || self.is_authenticated() {
+            return Ok(response);
+        }
+        let Some(issued) = response
+            .pointer("/responseContext/visitorData")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            return Ok(response);
+        };
+        log::debug!("player: primed a server-issued visitor for deciphering");
+        self.set_stream_visitor(issued.clone()).await;
+        self.execute_visiting("player", client, payload, true, Some(&issued))
+            .await
     }
 
     async fn stream_player(&self, video_id: &str) -> Result<Value> {
@@ -131,6 +262,7 @@ impl YtMusic {
             .bytes()
             .await
             .context("cannot read player response")?;
+        log::debug!("player via ANDROID_VR: {status}, {} bytes", bytes.len());
         serde_json::from_slice(&bytes)
             .with_context(|| format!("player returned non-json response with status {status}"))
     }
@@ -213,6 +345,141 @@ async fn range(
     }
     let chunk = response.bytes().await.context("cannot read stream chunk")?;
     Ok(chunk.to_vec())
+}
+
+struct Ciphered {
+    itag: u32,
+    mime: String,
+    codec: String,
+    bitrate: u32,
+    duration: Option<Duration>,
+    content_length: Option<u64>,
+    loudness_db: Option<f32>,
+    url: String,
+    signature: Option<(String, String)>,
+}
+
+fn ciphered(format: &Value) -> Option<Ciphered> {
+    let mime = format.get("mimeType").and_then(Value::as_str)?;
+    if !mime.starts_with("audio/") {
+        return None;
+    }
+    let (url, signature) = match format.get("signatureCipher").and_then(Value::as_str) {
+        Some(cipher) => {
+            let held = reqwest::Url::parse(&format!("https://cipher/?{cipher}")).ok()?;
+            let url = param(&held, "url")?;
+            let sig = param(&held, "s")?;
+            let into = param(&held, "sp").unwrap_or_else(|| "signature".to_string());
+            (url, Some((into, sig)))
+        }
+        None => (format.get("url").and_then(Value::as_str)?.to_string(), None),
+    };
+    let codec = mime
+        .split_once("codecs=\"")
+        .map(|(_, tail)| tail.trim_end_matches('"'))
+        .unwrap_or_default();
+    Some(Ciphered {
+        itag: format.get("itag").and_then(Value::as_u64)? as u32,
+        mime: mime.to_string(),
+        codec: codec.to_string(),
+        bitrate: format.get("bitrate").and_then(Value::as_u64).unwrap_or(0) as u32,
+        duration: format
+            .get("approxDurationMs")
+            .and_then(Value::as_str)
+            .and_then(|ms| ms.parse::<u64>().ok())
+            .map(Duration::from_millis),
+        content_length: format
+            .get("contentLength")
+            .and_then(Value::as_str)
+            .and_then(|length| length.parse().ok()),
+        loudness_db: format
+            .get("loudnessDb")
+            .and_then(Value::as_f64)
+            .map(|db| db as f32),
+        url,
+        signature,
+    })
+}
+
+async fn decipher(solver: &crate::deobf::Solver, format: &Ciphered) -> Result<String> {
+    let mut url = reqwest::Url::parse(&format.url).context("the stream url does not parse")?;
+    let throttle = param(&url, "n");
+    let signature = format.signature.as_ref().map(|(_, sig)| sig.as_str());
+    let started = std::time::Instant::now();
+    let solved = solver.solve(signature, throttle.as_deref()).await?;
+    log::debug!(
+        "deobf: itag {} solved in {:?}, signature {} chars, n {} -> {}",
+        format.itag,
+        started.elapsed(),
+        solved.sig.as_deref().map_or(0, str::len),
+        throttle.as_deref().unwrap_or("none"),
+        solved.n.as_deref().unwrap_or("none")
+    );
+    let mut changes: Vec<(&str, &str)> = Vec::with_capacity(2);
+    if let Some((into, _)) = &format.signature {
+        let sig = solved
+            .sig
+            .as_deref()
+            .context("the solver returned no signature")?;
+        changes.push((into.as_str(), sig));
+    }
+    if throttle.is_some() {
+        let n = solved
+            .n
+            .as_deref()
+            .context("the solver returned no n parameter")?;
+        changes.push(("n", n));
+    }
+    set_params(&mut url, &changes);
+    Ok(url.to_string())
+}
+
+fn describe(format: &AudioFormat, bytes: usize) -> String {
+    format!(
+        "itag {} {} {} kbps, {:.1} MiB",
+        format.itag,
+        format.codec,
+        format.bitrate / 1000,
+        bytes as f64 / (1024.0 * 1024.0)
+    )
+}
+
+fn param(url: &reqwest::Url, key: &str) -> Option<String> {
+    url.query_pairs()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value.into_owned())
+}
+
+fn set_params(url: &mut reqwest::Url, changes: &[(&str, &str)]) {
+    let existing: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .collect();
+    let mut query = url.query_pairs_mut();
+    query.clear();
+    for (name, value) in &existing {
+        match changes.iter().find(|(key, _)| key == name) {
+            Some((_, replacement)) => query.append_pair(name, replacement),
+            None => query.append_pair(name, value),
+        };
+    }
+    for (key, value) in changes {
+        if !existing.iter().any(|(name, _)| name == key) {
+            query.append_pair(key, value);
+        }
+    }
+    query.finish();
+}
+
+fn prefer_aac(formats: Vec<Ciphered>) -> Option<Ciphered> {
+    let aac = formats
+        .iter()
+        .position(|format| format.mime.starts_with("audio/mp4"));
+    let mut formats = formats;
+    match aac {
+        Some(at) => Some(formats.swap_remove(at)),
+        None => formats.into_iter().next(),
+    }
 }
 
 fn pick(formats: Vec<AudioFormat>) -> Option<AudioFormat> {

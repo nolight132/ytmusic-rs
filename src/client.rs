@@ -14,6 +14,8 @@ pub struct YtMusic {
     pub(crate) http: reqwest::Client,
     visitor: String,
     stream_visitor: RwLock<Option<String>>,
+    solver: RwLock<Option<std::sync::Arc<crate::deobf::Solver>>>,
+    player_cache: Option<PathBuf>,
     tokens: Option<RwLock<Tokens>>,
     cookies: Option<String>,
     authuser: usize,
@@ -43,6 +45,8 @@ impl YtMusic {
             http: reqwest::Client::new(),
             visitor: generate_visitor_data(),
             stream_visitor: RwLock::new(None),
+            solver: RwLock::new(None),
+            player_cache: None,
             tokens: None,
             cookies: None,
             authuser: 0,
@@ -65,6 +69,11 @@ impl YtMusic {
 
     pub fn cache_resolutions(mut self, path: PathBuf) -> Self {
         self.resolve_cache = crate::dedup::ResolveCache::disk(path);
+        self
+    }
+
+    pub fn cache_player(mut self, path: PathBuf) -> Self {
+        self.player_cache = Some(path);
         self
     }
 
@@ -93,6 +102,18 @@ impl YtMusic {
         payload: Value,
         use_auth: bool,
     ) -> Result<Value> {
+        self.execute_visiting(endpoint, client, payload, use_auth, None)
+            .await
+    }
+
+    pub(crate) async fn execute_visiting(
+        &self,
+        endpoint: &str,
+        client: Client,
+        payload: Value,
+        use_auth: bool,
+        guest: Option<&str>,
+    ) -> Result<Value> {
         let bearer = match use_auth {
             true => self.bearer().await?,
             false => None,
@@ -101,7 +122,7 @@ impl YtMusic {
         let authenticated = bearer.is_some() || cookies.is_some();
         let visitor = match authenticated {
             true => "",
-            false => self.visitor.as_str(),
+            false => guest.unwrap_or(self.visitor.as_str()),
         };
         let mut body = payload;
         let context = client.context(visitor, &self.hl, &self.gl);
@@ -140,7 +161,7 @@ impl YtMusic {
             (None, Some(bearer)) => {
                 request = request.header("Authorization", format!("Bearer {bearer}"));
             }
-            (None, None) => request = request.header("X-Goog-Visitor-Id", &self.visitor),
+            (None, None) => request = request.header("X-Goog-Visitor-Id", visitor),
         }
         let response = request
             .send()
@@ -181,6 +202,10 @@ impl YtMusic {
         self.cookies.is_some()
     }
 
+    pub fn is_authenticated(&self) -> bool {
+        self.cookies.is_some() || self.tokens.is_some()
+    }
+
     pub fn authuser(&self) -> usize {
         self.authuser
     }
@@ -191,6 +216,28 @@ impl YtMusic {
 
     pub fn client(&self) -> &reqwest::Client {
         &self.http
+    }
+
+    pub(crate) async fn solver(&self) -> Result<std::sync::Arc<crate::deobf::Solver>> {
+        if let Some(ready) = self.solver.read().await.clone() {
+            return Ok(ready);
+        }
+        let mut slot = self.solver.write().await;
+        if let Some(ready) = slot.clone() {
+            return Ok(ready);
+        }
+        let cache = self.player_cache.clone();
+        let script = crate::deobf::fetch(&self.http, cache.as_deref()).await?;
+        let id = script.id.clone();
+        let started = std::time::Instant::now();
+        let solver =
+            tokio::task::spawn_blocking(move || crate::deobf::Solver::start(script, cache))
+                .await
+                .context("the deobfuscator did not start")??;
+        log::debug!("deobf: player {id} ready in {:?}", started.elapsed());
+        let solver = std::sync::Arc::new(solver);
+        *slot = Some(solver.clone());
+        Ok(solver)
     }
 
     pub(crate) async fn stream_visitor(&self) -> Option<String> {
