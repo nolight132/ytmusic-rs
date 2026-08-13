@@ -8,7 +8,17 @@ fn token_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp/ytmusic-tokens.json"))
 }
 
+fn player_cache() -> PathBuf {
+    std::env::var_os("YTMUSIC_PLAYER_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp/ytmusic-player.json"))
+}
+
 fn client() -> YtMusic {
+    session().cache_player(player_cache())
+}
+
+fn session() -> YtMusic {
     if let Some(name) = std::env::var_os("YTMUSIC_BROWSER") {
         let name = name.to_string_lossy();
         if let Some(browser) = ytmusic::browser::detect()
@@ -121,19 +131,16 @@ async fn main() -> anyhow::Result<()> {
         }
         "stream" => {
             let mark = std::time::Instant::now();
-            let format = api.best_audio(&argument).await?;
+            let (format, data) = api.load_audio(&argument).await?;
             println!(
-                "itag={} codec={} bitrate={} length={:?} loudness={:?} resolve={:?}",
+                "itag={} codec={} bitrate={} loudness={:?} got {} bytes in {:?}",
                 format.itag,
                 format.codec,
                 format.bitrate,
-                format.content_length,
                 format.loudness_db,
+                data.len(),
                 mark.elapsed()
             );
-            let mark = std::time::Instant::now();
-            let data = api.download(&format).await?;
-            println!("downloaded {} bytes in {:?}", data.len(), mark.elapsed());
         }
         "liked" => {
             for track in api.liked_songs().await? {
@@ -280,10 +287,124 @@ async fn main() -> anyhow::Result<()> {
         "raw" => {
             let payload: serde_json::Value =
                 serde_json::from_str(&std::env::args().nth(3).unwrap_or_else(|| "{}".into()))?;
-            let response = api
-                .execute(&argument, ytmusic::Client::Music, payload)
-                .await?;
+            let client = match std::env::var("CLIENT").unwrap_or_default().as_str() {
+                "tv" => ytmusic::Client::Tv,
+                "tv_downgraded" => ytmusic::Client::TvDowngraded,
+                "android_vr" => ytmusic::Client::AndroidVr,
+                _ => ytmusic::Client::Music,
+            };
+            let response = api.execute(&argument, client, payload).await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        "decipher" => {
+            let mark = std::time::Instant::now();
+            let format = api.deciphered_audio(&argument).await?;
+            println!(
+                "itag={} codec={} bitrate={} length={:?} resolve={:?}",
+                format.itag,
+                format.codec,
+                format.bitrate,
+                format.content_length,
+                mark.elapsed()
+            );
+            let mark = std::time::Instant::now();
+            let data = api.download(&format).await?;
+            println!("downloaded {} bytes in {:?}", data.len(), mark.elapsed());
+        }
+        "deobfcheck" => {
+            let mark = std::time::Instant::now();
+            let cache = std::env::var_os("YTMUSIC_PLAYER_CACHE").map(std::path::PathBuf::from);
+            let script = ytmusic::deobf::fetch(api.client(), cache.as_deref()).await?;
+            println!(
+                "player={} sts={} bytes={} fetched in {:?}",
+                script.id,
+                script.sts,
+                script.code.len(),
+                mark.elapsed()
+            );
+            let mark = std::time::Instant::now();
+            let solver = ytmusic::deobf::Solver::start(script, cache)?;
+            println!("solver ready in {:?}", mark.elapsed());
+            let sig: String = std::iter::repeat_n("abcdefghij", 11).collect();
+            for round in 1..=3 {
+                let mark = std::time::Instant::now();
+                let solved = solver.solve(Some(&sig), Some("ghijkl")).await?;
+                println!(
+                    "round {round}: sig={} n={:?} in {:?}",
+                    solved.sig.as_deref().unwrap_or("none").len(),
+                    solved.n,
+                    mark.elapsed()
+                );
+            }
+        }
+        "players" => {
+            use ytmusic::Client;
+            let clients = [
+                ("music", Client::Music),
+                ("android_music", Client::AndroidMusic),
+                ("tv", Client::Tv),
+                ("tv_downgraded", Client::TvDowngraded),
+                ("ios", Client::Ios),
+                ("android", Client::Android),
+                ("android_vr", Client::AndroidVr),
+            ];
+            for (label, client) in clients {
+                for auth in [true, false] {
+                    let sts: u64 = std::env::var("STS")
+                        .ok()
+                        .and_then(|sts| sts.parse().ok())
+                        .unwrap_or(0);
+                    let payload = serde_json::json!({
+                        "videoId": argument,
+                        "contentCheckOk": true,
+                        "racyCheckOk": true,
+                        "playbackContext": {
+                            "contentPlaybackContext": {
+                                "html5Preference": "HTML5_PREF_WANTS",
+                                "signatureTimestamp": sts,
+                            }
+                        },
+                    });
+                    let outcome = api
+                        .execute_with("player", client, payload, auth)
+                        .await
+                        .map(|response| {
+                            let status = response
+                                .pointer("/playabilityStatus/status")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("NONE")
+                                .to_string();
+                            let reason = response
+                                .pointer("/playabilityStatus/reason")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let formats = response
+                                .pointer("/streamingData/adaptiveFormats")
+                                .and_then(|value| value.as_array().cloned())
+                                .unwrap_or_default();
+                            let audio: Vec<_> = formats
+                                .iter()
+                                .filter(|format| {
+                                    format
+                                        .get("mimeType")
+                                        .and_then(|mime| mime.as_str())
+                                        .is_some_and(|mime| mime.starts_with("audio/"))
+                                })
+                                .collect();
+                            let direct = audio
+                                .iter()
+                                .filter(|format| format.get("url").is_some())
+                                .count();
+                            format!(
+                                "{status:16} audio={:<3} direct={direct:<3} {reason}",
+                                audio.len()
+                            )
+                        })
+                        .unwrap_or_else(|error| format!("failed: {error:#}"));
+                    println!("{label:14} auth={auth:<6} {outcome}");
+                }
+            }
         }
         "suite" => run_suite(&api).await,
         other => {

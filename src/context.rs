@@ -3,8 +3,6 @@ use base64::engine::general_purpose::URL_SAFE;
 use rand::Rng as _;
 use serde_json::{Value, json};
 
-pub const DESKTOP_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
-
 const ID_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12,6 +10,7 @@ pub enum Client {
     Music,
     AndroidMusic,
     Tv,
+    TvDowngraded,
     Ios,
     Android,
     AndroidVr,
@@ -22,7 +21,7 @@ impl Client {
         match self {
             Self::Music => "WEB_REMIX",
             Self::AndroidMusic => "ANDROID_MUSIC",
-            Self::Tv => "TVHTML5",
+            Self::Tv | Self::TvDowngraded => "TVHTML5",
             Self::Ios => "IOS",
             Self::Android => "ANDROID",
             Self::AndroidVr => "ANDROID_VR",
@@ -34,6 +33,7 @@ impl Client {
             Self::Music => "1.20250219.01.00",
             Self::AndroidMusic => "5.34.51",
             Self::Tv => "7.20260311.12.00",
+            Self::TvDowngraded => "5.20260114",
             Self::Ios => "20.11.6",
             Self::Android => "21.03.36",
             Self::AndroidVr => "1.65.10",
@@ -44,7 +44,7 @@ impl Client {
         match self {
             Self::Music => 67,
             Self::AndroidMusic => 21,
-            Self::Tv => 7,
+            Self::Tv | Self::TvDowngraded => 7,
             Self::Ios => 5,
             Self::Android => 3,
             Self::AndroidVr => 28,
@@ -53,11 +53,13 @@ impl Client {
 
     pub fn user_agent(self) -> &'static str {
         match self {
-            Self::Music => DESKTOP_UA,
+            Self::Music => {
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            }
             Self::AndroidMusic => {
                 "com.google.android.apps.youtube.music/5.34.51 (Linux; U; Android 11) gzip"
             }
-            Self::Tv => "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
+            Self::Tv | Self::TvDowngraded => "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
             Self::Ios => {
                 "com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)"
             }
@@ -90,7 +92,7 @@ impl Client {
                 "browserVersion": "125.0.0.0",
                 "originalUrl": "https://music.youtube.com",
             }),
-            Self::Tv => json!({
+            Self::Tv | Self::TvDowngraded => json!({
                 "platform": "TV",
                 "clientFormFactor": "UNKNOWN_FORM_FACTOR",
             }),
