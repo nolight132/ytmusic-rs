@@ -78,6 +78,30 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        "searchalbums" => {
+            for album in api.search_albums(&argument).await? {
+                println!(
+                    "{:20} {:40} {:24} {:?} {:?} playlist={:?}",
+                    album.browse_id,
+                    truncate(&album.title, 40),
+                    truncate(&artist_names(&album.artists), 24),
+                    album.kind,
+                    album.year,
+                    album.playlist_id,
+                );
+            }
+        }
+        "searchplaylists" => {
+            for playlist in api.search_playlists(&argument).await? {
+                println!(
+                    "{:38} {:44} author={:?} tracks={:?}",
+                    playlist.id,
+                    truncate(&playlist.title, 44),
+                    playlist.author,
+                    playlist.track_count,
+                );
+            }
+        }
         "album" => {
             let detail = api.album(&argument).await?;
             println!(
@@ -410,7 +434,7 @@ async fn main() -> anyhow::Result<()> {
         other => {
             eprintln!("unknown command: {other}");
             eprintln!(
-                "usage: probe <login|search|album|artist|playlist|radio|stream|liked|albums|playlists|profile|suite> [arg]"
+                "usage: probe <login|search|searchalbums|searchplaylists|album|artist|playlist|radio|stream|liked|albums|playlists|profile|suite> [arg]"
             );
         }
     }

@@ -3,7 +3,7 @@ use serde_json::json;
 
 use crate::client::YtMusic;
 use crate::context::Client;
-use crate::models::Track;
+use crate::models::{Album, Playlist, Track};
 use crate::nav::Nav as _;
 use crate::parse;
 
@@ -32,6 +32,44 @@ impl YtMusic {
             }
         }
         Ok(tracks)
+    }
+
+    pub async fn search_albums(&self, query: &str) -> Result<Vec<Album>> {
+        let response = self
+            .execute(
+                "search",
+                Client::Music,
+                json!({ "query": query, "params": ALBUMS }),
+            )
+            .await?;
+        let mut albums = Vec::new();
+        for shelf in parse::find_renderers(&response, "musicShelfRenderer") {
+            for item in shelf.items(&["contents"]) {
+                if let Some(album) = parse::list_item_album(item) {
+                    albums.push(album);
+                }
+            }
+        }
+        Ok(albums)
+    }
+
+    pub async fn search_playlists(&self, query: &str) -> Result<Vec<Playlist>> {
+        let response = self
+            .execute(
+                "search",
+                Client::Music,
+                json!({ "query": query, "params": PLAYLISTS }),
+            )
+            .await?;
+        let mut playlists = Vec::new();
+        for shelf in parse::find_renderers(&response, "musicShelfRenderer") {
+            for item in shelf.items(&["contents"]) {
+                if let Some(playlist) = parse::list_item_playlist(item) {
+                    playlists.push(playlist);
+                }
+            }
+        }
+        Ok(playlists)
     }
 
     pub async fn search_suggestions(&self, input: &str) -> Result<Vec<String>> {
