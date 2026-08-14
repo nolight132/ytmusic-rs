@@ -6,6 +6,8 @@ use crate::util::{parse_clock, parse_year};
 
 pub const EXPLICIT_BADGE: &str = "MUSIC_EXPLICIT_BADGE";
 const GREY_OUT: &str = "MUSIC_ITEM_RENDERER_DISPLAY_POLICY_GREY_OUT";
+const ALBUM_PAGE: &str = "MUSIC_PAGE_TYPE_ALBUM";
+const PLAYLIST_PAGE: &str = "MUSIC_PAGE_TYPE_PLAYLIST";
 
 pub fn thumbnails(node: &Value) -> Vec<Thumbnail> {
     let mut found = Vec::new();
@@ -90,11 +92,7 @@ pub fn list_item_track(item: &Value) -> Option<Track> {
     let renderer = item
         .at(&["musicResponsiveListItemRenderer"])
         .unwrap_or(item);
-    let columns: Vec<&Value> = renderer
-        .items(&["flexColumns"])
-        .iter()
-        .filter_map(|column| column.at(&["musicResponsiveListItemFlexColumnRenderer"]))
-        .collect();
+    let columns = flex_columns(renderer);
     let first = columns.first()?;
     let title = first.run_text(&["text"])?;
     let video_id = renderer
@@ -264,22 +262,7 @@ pub fn two_row_album(item: &Value) -> Option<Album> {
         .iter()
         .filter_map(|run| run.str_at(&["text"]))
         .find_map(parse_year);
-    let mut artists = artist_runs(subtitle_runs);
-    if artists.is_empty() {
-        artists = subtitle_runs
-            .iter()
-            .filter_map(|run| run.str_at(&["text"]))
-            .filter(|text| {
-                !matches!(*text, " • " | ", " | " & ")
-                    && album_kind(text).is_none()
-                    && parse_year(text).is_none()
-            })
-            .map(|text| ArtistRef {
-                name: text.to_string(),
-                id: None,
-            })
-            .collect();
-    }
+    let artists = subtitle_artists(subtitle_runs);
     let playlist_id = renderer
         .str_at(&[
             "thumbnailOverlay",
@@ -298,6 +281,30 @@ pub fn two_row_album(item: &Value) -> Option<Album> {
         artists,
         kind,
         year,
+        track_count: None,
+        thumbnails: thumbnails(renderer),
+    })
+}
+
+pub fn list_item_album(item: &Value) -> Option<Album> {
+    let renderer = item
+        .at(&["musicResponsiveListItemRenderer"])
+        .unwrap_or(item);
+    if page_type(renderer) != Some(ALBUM_PAGE) {
+        return None;
+    }
+    let browse_id = browse_id(renderer)?.to_string();
+    let columns = flex_columns(renderer);
+    let title = columns.first()?.run_text(&["text"])?;
+    let runs = subtitle_column(&columns);
+    let texts = || runs.iter().filter_map(|run| run.str_at(&["text"]));
+    Some(Album {
+        browse_id,
+        playlist_id: overlay_playlist_id(renderer),
+        title,
+        artists: subtitle_artists(runs),
+        kind: texts().find_map(album_kind).unwrap_or(AlbumKind::Album),
+        year: texts().find_map(parse_year),
         track_count: None,
         thumbnails: thumbnails(renderer),
     })
@@ -324,17 +331,7 @@ pub fn two_row_playlist(item: &Value) -> Option<Playlist> {
     let owned = has_icon(renderer, "DELETE");
     let author = match owned {
         true => None,
-        false => subtitle_runs
-            .iter()
-            .filter_map(|run| run.str_at(&["text"]))
-            .find(|text| {
-                !matches!(*text, " • " | ", ")
-                    && !text.starts_with("Playlist")
-                    && !text.contains("view")
-                    && !text.contains("song")
-                    && !text.contains("track")
-            })
-            .map(str::to_string),
+        false => plain_author(subtitle_runs).map(str::to_string),
     };
     let track_count = subtitle_runs
         .iter()
@@ -347,6 +344,38 @@ pub fn two_row_playlist(item: &Value) -> Option<Playlist> {
         owned,
         public: privacy(renderer),
         track_count,
+        thumbnails: thumbnails(renderer),
+    })
+}
+
+pub fn list_item_playlist(item: &Value) -> Option<Playlist> {
+    let renderer = item
+        .at(&["musicResponsiveListItemRenderer"])
+        .unwrap_or(item);
+    if page_type(renderer) != Some(PLAYLIST_PAGE) {
+        return None;
+    }
+    let browse_id = browse_id(renderer)?;
+    let columns = flex_columns(renderer);
+    let title = columns.first()?.run_text(&["text"])?;
+    let runs = subtitle_column(&columns);
+    let owned = has_icon(renderer, "DELETE");
+    let author = match owned {
+        true => None,
+        false => channel_author(runs)
+            .or_else(|| plain_author(runs))
+            .map(str::to_string),
+    };
+    Some(Playlist {
+        id: browse_id.trim_start_matches("VL").to_string(),
+        title,
+        author,
+        owned,
+        public: privacy(renderer),
+        track_count: runs
+            .iter()
+            .filter_map(|run| run.str_at(&["text"]))
+            .find_map(count_from_text),
         thumbnails: thumbnails(renderer),
     })
 }
@@ -391,6 +420,85 @@ pub fn find_renderers<'a>(response: &'a Value, key: &str) -> Vec<&'a Value> {
     let mut found = Vec::new();
     find_all(response, key, &mut found);
     found
+}
+
+fn flex_columns(renderer: &Value) -> Vec<&Value> {
+    renderer
+        .items(&["flexColumns"])
+        .iter()
+        .filter_map(|column| column.at(&["musicResponsiveListItemFlexColumnRenderer"]))
+        .collect()
+}
+
+fn subtitle_column<'a>(columns: &[&'a Value]) -> &'a [Value] {
+    columns
+        .get(1)
+        .map_or(&[] as &[Value], |column| column.runs(&["text"]))
+}
+
+fn page_type(renderer: &Value) -> Option<&str> {
+    renderer.str_at(&[
+        "navigationEndpoint",
+        "browseEndpoint",
+        "browseEndpointContextSupportedConfigs",
+        "browseEndpointContextMusicConfig",
+        "pageType",
+    ])
+}
+
+fn browse_id(renderer: &Value) -> Option<&str> {
+    renderer.str_at(&["navigationEndpoint", "browseEndpoint", "browseId"])
+}
+
+fn overlay_playlist_id(renderer: &Value) -> Option<String> {
+    let play = renderer.at(&[
+        "overlay",
+        "musicItemThumbnailOverlayRenderer",
+        "content",
+        "musicPlayButtonRenderer",
+        "playNavigationEndpoint",
+    ])?;
+    play.str_at(&["watchPlaylistEndpoint", "playlistId"])
+        .or_else(|| play.str_at(&["watchEndpoint", "playlistId"]))
+        .map(str::to_string)
+}
+
+fn subtitle_artists(runs: &[Value]) -> Vec<ArtistRef> {
+    let artists = artist_runs(runs);
+    if !artists.is_empty() {
+        return artists;
+    }
+    runs.iter()
+        .filter_map(|run| run.str_at(&["text"]))
+        .filter(|text| {
+            !matches!(*text, " • " | ", " | " & ")
+                && album_kind(text).is_none()
+                && parse_year(text).is_none()
+        })
+        .map(|text| ArtistRef {
+            name: text.to_string(),
+            id: None,
+        })
+        .collect()
+}
+
+fn channel_author(runs: &[Value]) -> Option<&str> {
+    runs.iter().find_map(|run| match run_browse_id(run) {
+        Some(id) if id.starts_with("UC") => run.str_at(&["text"]),
+        _ => None,
+    })
+}
+
+fn plain_author(runs: &[Value]) -> Option<&str> {
+    runs.iter()
+        .filter_map(|run| run.str_at(&["text"]))
+        .find(|text| {
+            !matches!(*text, " • " | ", ")
+                && !text.starts_with("Playlist")
+                && !text.contains("view")
+                && !text.contains("song")
+                && !text.contains("track")
+        })
 }
 
 #[cfg(test)]
