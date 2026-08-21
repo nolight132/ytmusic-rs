@@ -3,7 +3,6 @@ pub mod browser;
 pub mod client;
 pub mod context;
 pub mod dedup;
-pub mod deobf;
 pub mod library;
 pub mod models;
 pub mod mutate;

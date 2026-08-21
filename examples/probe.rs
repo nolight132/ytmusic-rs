@@ -8,14 +8,8 @@ fn token_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp/ytmusic-tokens.json"))
 }
 
-fn player_cache() -> PathBuf {
-    std::env::var_os("YTMUSIC_PLAYER_CACHE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp/ytmusic-player.json"))
-}
-
 fn client() -> YtMusic {
-    session().cache_player(player_cache())
+    session()
 }
 
 fn session() -> YtMusic {
@@ -313,64 +307,18 @@ async fn main() -> anyhow::Result<()> {
                 serde_json::from_str(&std::env::args().nth(3).unwrap_or_else(|| "{}".into()))?;
             let client = match std::env::var("CLIENT").unwrap_or_default().as_str() {
                 "tv" => ytmusic::Client::Tv,
-                "tv_downgraded" => ytmusic::Client::TvDowngraded,
-                "android_vr" => ytmusic::Client::AndroidVr,
+                "visionos" => ytmusic::Client::VisionOs,
                 _ => ytmusic::Client::Music,
             };
             let response = api.execute(&argument, client, payload).await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
-        "decipher" => {
-            let mark = std::time::Instant::now();
-            let format = api.deciphered_audio(&argument).await?;
-            println!(
-                "itag={} codec={} bitrate={} length={:?} resolve={:?}",
-                format.itag,
-                format.codec,
-                format.bitrate,
-                format.content_length,
-                mark.elapsed()
-            );
-            let mark = std::time::Instant::now();
-            let data = api.download(&format).await?;
-            println!("downloaded {} bytes in {:?}", data.len(), mark.elapsed());
-        }
-        "deobfcheck" => {
-            let mark = std::time::Instant::now();
-            let cache = std::env::var_os("YTMUSIC_PLAYER_CACHE").map(std::path::PathBuf::from);
-            let script = ytmusic::deobf::fetch(api.client(), cache.as_deref()).await?;
-            println!(
-                "player={} sts={} bytes={} fetched in {:?}",
-                script.id,
-                script.sts,
-                script.code.len(),
-                mark.elapsed()
-            );
-            let mark = std::time::Instant::now();
-            let solver = ytmusic::deobf::Solver::start(script, cache)?;
-            println!("solver ready in {:?}", mark.elapsed());
-            let sig: String = std::iter::repeat_n("abcdefghij", 11).collect();
-            for round in 1..=3 {
-                let mark = std::time::Instant::now();
-                let solved = solver.solve(Some(&sig), Some("ghijkl")).await?;
-                println!(
-                    "round {round}: sig={} n={:?} in {:?}",
-                    solved.sig.as_deref().unwrap_or("none").len(),
-                    solved.n,
-                    mark.elapsed()
-                );
-            }
-        }
         "players" => {
             use ytmusic::Client;
             let clients = [
                 ("music", Client::Music),
-                ("android_music", Client::AndroidMusic),
                 ("tv", Client::Tv),
-                ("tv_downgraded", Client::TvDowngraded),
-                ("ios", Client::Ios),
-                ("android", Client::Android),
-                ("android_vr", Client::AndroidVr),
+                ("visionos", Client::VisionOs),
             ];
             for (label, client) in clients {
                 for auth in [true, false] {
