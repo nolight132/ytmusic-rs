@@ -14,6 +14,8 @@ const VISITOR_URL: &str = "https://www.youtube.com/sw.js_data";
 pub struct YtMusic {
     pub(crate) http: reqwest::Client,
     visitor: RwLock<Option<String>>,
+    solver: RwLock<Option<std::sync::Arc<crate::deobf::Solver>>>,
+    player_cache: Option<PathBuf>,
     tokens: Option<RwLock<Tokens>>,
     cookies: Option<String>,
     authuser: usize,
@@ -42,6 +44,8 @@ impl YtMusic {
         Self {
             http: reqwest::Client::new(),
             visitor: RwLock::new(None),
+            solver: RwLock::new(None),
+            player_cache: None,
             tokens: None,
             cookies: None,
             authuser: 0,
@@ -64,6 +68,11 @@ impl YtMusic {
 
     pub fn cache_resolutions(mut self, path: PathBuf) -> Self {
         self.resolve_cache = crate::dedup::ResolveCache::disk(path);
+        self
+    }
+
+    pub fn cache_player(mut self, path: PathBuf) -> Self {
+        self.player_cache = Some(path);
         self
     }
 
@@ -206,6 +215,28 @@ impl YtMusic {
 
     pub fn client(&self) -> &reqwest::Client {
         &self.http
+    }
+
+    pub(crate) async fn solver(&self) -> Result<std::sync::Arc<crate::deobf::Solver>> {
+        if let Some(ready) = self.solver.read().await.clone() {
+            return Ok(ready);
+        }
+        let mut slot = self.solver.write().await;
+        if let Some(ready) = slot.clone() {
+            return Ok(ready);
+        }
+        let cache = self.player_cache.clone();
+        let script = crate::deobf::fetch(&self.http, cache.as_deref()).await?;
+        let id = script.id.clone();
+        let started = std::time::Instant::now();
+        let solver =
+            tokio::task::spawn_blocking(move || crate::deobf::Solver::start(script, cache))
+                .await
+                .context("the deobfuscator did not start")??;
+        log::debug!("deobf: player {id} ready in {:?}", started.elapsed());
+        let solver = std::sync::Arc::new(solver);
+        *slot = Some(solver.clone());
+        Ok(solver)
     }
 
     pub(crate) async fn visitor(&self) -> String {

@@ -8,8 +8,14 @@ fn token_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp/ytmusic-tokens.json"))
 }
 
+fn player_cache() -> PathBuf {
+    std::env::var_os("YTMUSIC_PLAYER_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp/ytmusic-player.json"))
+}
+
 fn client() -> YtMusic {
-    session()
+    session().cache_player(player_cache())
 }
 
 fn session() -> YtMusic {
