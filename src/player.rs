@@ -11,6 +11,17 @@ const CHUNK: u64 = 1024 * 1024;
 const PARALLEL: usize = 4;
 const MAX_STREAM_BYTES: u64 = 256 * 1024 * 1024;
 
+#[derive(Clone, Copy, Debug)]
+pub struct SignInRequired;
+
+impl std::fmt::Display for SignInRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("youtube only serves this track to a signed-in listener")
+    }
+}
+
+impl std::error::Error for SignInRequired {}
+
 #[derive(Clone, Debug)]
 pub struct Playability {
     pub status: String,
@@ -20,6 +31,10 @@ pub struct Playability {
 impl Playability {
     pub fn ok(&self) -> bool {
         self.status == "OK"
+    }
+
+    pub fn gated(&self) -> bool {
+        self.status == "LOGIN_REQUIRED"
     }
 }
 
@@ -359,12 +374,16 @@ fn prefer_aac(formats: Vec<Ciphered>) -> Option<Ciphered> {
 fn playable<'a>(response: &'a Value, video_id: &str) -> Result<&'a Vec<Value>> {
     let playability = playability(response);
     if !playability.ok() {
-        bail!(
+        let refused = format!(
             "{} is not playable: {} ({})",
             video_id,
             playability.status,
             playability.reason.as_deref().unwrap_or("no reason")
         );
+        return match playability.gated() {
+            true => Err(anyhow::Error::new(SignInRequired).context(refused)),
+            false => Err(anyhow::anyhow!(refused)),
+        };
     }
     match response
         .pointer("/streamingData/adaptiveFormats")
