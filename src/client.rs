@@ -247,15 +247,16 @@ impl YtMusic {
         if let Some(ready) = slot.clone() {
             return ready;
         }
-        let issued = match fetch_visitor(&self.http).await {
-            Ok(issued) => issued,
+        match fetch_visitor(&self.http).await {
+            Ok(issued) => {
+                *slot = Some(issued.clone());
+                issued
+            }
             Err(error) => {
-                log::warn!("ytmusic: cannot fetch a visitor id: {error:#}");
+                log::warn!("ytmusic: cannot fetch a visitor id, asking again next time: {error:#}");
                 String::new()
             }
-        };
-        *slot = Some(issued.clone());
-        issued
+        }
     }
 
     pub(crate) async fn adopt_visitor(&self, issued: String) {
