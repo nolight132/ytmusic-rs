@@ -19,3 +19,4 @@ pub use client::YtMusic;
 pub use context::Client;
 pub use models::*;
 pub use oauth::{ClientIdentity, DeviceCode, Tokens};
+pub use player::SignInRequired;
