@@ -58,17 +58,15 @@ impl YtMusic {
     }
 
     pub async fn best_audio(&self, video_id: &str) -> Result<AudioFormat> {
-        match self.is_authenticated() {
-            true => match self.signed_audio(video_id).await {
-                Ok(format) => Ok(format),
-                Err(signed) => {
-                    log::debug!("player: the signed stream for {video_id} failed ({signed:#})");
-                    self.guest_audio(video_id)
-                        .await
-                        .with_context(|| format!("the signed stream failed too ({signed:#})"))
-                }
-            },
-            false => self.guest_audio(video_id).await,
+        match self.guest_audio(video_id).await {
+            Ok(format) => Ok(format),
+            Err(guest) if self.is_authenticated() => {
+                log::debug!("player: the guest stream for {video_id} failed ({guest:#})");
+                self.signed_audio(video_id)
+                    .await
+                    .with_context(|| format!("the guest stream failed too ({guest:#})"))
+            }
+            Err(guest) => Err(guest),
         }
     }
 
