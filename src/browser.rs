@@ -329,14 +329,6 @@ fn read_chromium(db: &Path, key: &Key) -> Result<Vec<(String, String)>> {
 
 pub struct Key(Vec<u8>);
 
-fn passphrase(secret: &[u8], rounds: u32) -> Key {
-    use pbkdf2::pbkdf2_hmac;
-    use sha1::Sha1;
-    let mut key = [0u8; 16];
-    pbkdf2_hmac::<Sha1>(secret, b"saltysalt", rounds, &mut key);
-    Key(key.to_vec())
-}
-
 #[cfg(target_os = "linux")]
 fn chromium_key(_root: &Path, _name: &str) -> Result<Key> {
     Ok(passphrase(b"peanuts", 1))
@@ -417,11 +409,4 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
-}
-
-fn config_dir(home: &Path) -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| home.join(".config"))
 }
