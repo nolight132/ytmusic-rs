@@ -48,7 +48,7 @@ impl YtMusic {
             .filter_map(|run| run.str_at(&["text"]))
             .find_map(parse::count_from_text);
         let thumbnails = parse::thumbnails(header);
-        let playlist_id = playlist_id_of(&response);
+        let playlist_id = playlist_id_of(header);
         let description = parse::find_renderer(header, "musicDescriptionShelfRenderer")
             .and_then(|shelf| shelf.run_text(&["description"]))
             .or_else(|| header.run_text(&["description"]));
