@@ -5,6 +5,9 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 description = "YouTube Music InnerTube client"
 
+[features]
+bundled-sqlite = ["rusqlite/bundled"]
+
 [dependencies]
 aes = "0.8"
 anyhow = "1"
@@ -15,7 +18,7 @@ log = "0.4"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"
