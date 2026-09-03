@@ -4,7 +4,8 @@ use serde_json::{Value, json};
 use crate::client::YtMusic;
 use crate::context::Client;
 use crate::models::{
-    Album, AlbumDetail, AlbumKind, AlbumRef, Artist, ArtistRef, Playlist, PlaylistDetail, Track,
+    Album, AlbumDetail, AlbumKind, AlbumRef, Artist, ArtistRef, Playlist, PlaylistDetail,
+    PlaylistPage, Track,
 };
 use crate::nav::Nav as _;
 use crate::parse;
@@ -164,11 +165,26 @@ impl YtMusic {
     }
 
     pub async fn playlist(&self, playlist_id: &str) -> Result<PlaylistDetail> {
+        let mut detail = self.playlist_page(playlist_id).await?;
+        let mut pages = 0;
+        while let Some(token) = detail.continuation.take() {
+            pages += 1;
+            if pages > MAX_PAGES {
+                break;
+            }
+            let page = self.playlist_continuation(&token).await?;
+            detail.tracks.extend(page.tracks);
+            detail.continuation = page.continuation;
+        }
+        Ok(detail)
+    }
+
+    pub async fn playlist_page(&self, playlist_id: &str) -> Result<PlaylistDetail> {
         let browse_id = match playlist_id.starts_with("VL") {
             true => playlist_id.to_string(),
             false => format!("VL{playlist_id}"),
         };
-        let mut response = self
+        let response = self
             .execute("browse", Client::Music, json!({ "browseId": browse_id }))
             .await?;
         let editable =
@@ -202,17 +218,6 @@ impl YtMusic {
 
         let mut tracks = Vec::new();
         collect_list_tracks(&response, &mut tracks);
-        let mut pages = 0;
-        while let Some(token) = next_continuation(&response) {
-            pages += 1;
-            if pages > MAX_PAGES {
-                break;
-            }
-            response = self
-                .execute("browse", Client::Music, json!({ "continuation": token }))
-                .await?;
-            collect_list_tracks(&response, &mut tracks);
-        }
         Ok(PlaylistDetail {
             playlist: Playlist {
                 id: browse_id.trim_start_matches("VL").to_string(),
@@ -225,6 +230,19 @@ impl YtMusic {
             },
             public: privacy.as_deref() == Some("PUBLIC"),
             tracks,
+            continuation: next_continuation(&response),
+        })
+    }
+
+    pub async fn playlist_continuation(&self, token: &str) -> Result<PlaylistPage> {
+        let response = self
+            .execute("browse", Client::Music, json!({ "continuation": token }))
+            .await?;
+        let mut tracks = Vec::new();
+        collect_list_tracks(&response, &mut tracks);
+        Ok(PlaylistPage {
+            tracks,
+            continuation: next_continuation(&response),
         })
     }
 }

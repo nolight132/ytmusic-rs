@@ -92,6 +92,13 @@ pub struct PlaylistDetail {
     pub playlist: Playlist,
     pub public: bool,
     pub tracks: Vec<Track>,
+    pub continuation: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlaylistPage {
+    pub tracks: Vec<Track>,
+    pub continuation: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -5,6 +5,9 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 description = "YouTube Music InnerTube client"
 
+[features]
+bundled-sqlite = []
+
 [dependencies]
 aes = "0.8"
 anyhow = "1"
