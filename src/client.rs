@@ -19,6 +19,7 @@ pub struct YtMusic {
     tokens: Option<RwLock<Tokens>>,
     cookies: Option<String>,
     authuser: usize,
+    page_id: Option<String>,
     persist: Option<PathBuf>,
     pub(crate) resolve_cache: crate::dedup::ResolveCache,
     hl: String,
@@ -49,6 +50,7 @@ impl YtMusic {
             tokens: None,
             cookies: None,
             authuser: 0,
+            page_id: None,
             persist: None,
             resolve_cache: crate::dedup::ResolveCache::memory(),
             hl: "en".to_string(),
@@ -58,6 +60,16 @@ impl YtMusic {
 
     pub fn as_user(mut self, authuser: usize) -> Self {
         self.authuser = authuser;
+        self
+    }
+
+    /// Send authenticated requests on behalf of a YouTube Brand Account.
+    ///
+    /// `page_id` is the numeric Brand Account identifier shown in the Google
+    /// account URL after selecting the brand (for example,
+    /// `myaccount.google.com/b/<page_id>`).
+    pub fn as_brand_account(mut self, page_id: impl Into<String>) -> Self {
+        self.page_id = Some(page_id.into());
         self
     }
 
@@ -128,7 +140,7 @@ impl YtMusic {
         };
         let visitor = held.as_str();
         let mut body = payload;
-        let context = client.context(visitor, &self.hl, &self.gl);
+        let context = self.context(client, visitor);
         body.as_object_mut()
             .context("payload must be an object")?
             .insert("context".to_string(), context);
@@ -160,6 +172,9 @@ impl YtMusic {
                     .header("Cookie", cookies)
                     .header("X-Origin", origin)
                     .header("X-Goog-AuthUser", self.authuser.to_string());
+                if let Some(page_id) = &self.page_id {
+                    request = request.header("X-Goog-PageId", page_id);
+                }
             }
             (None, Some(bearer)) => {
                 request = request.header("Authorization", format!("Bearer {bearer}"));
@@ -211,6 +226,14 @@ impl YtMusic {
 
     pub fn authuser(&self) -> usize {
         self.authuser
+    }
+
+    fn context(&self, client: Client, visitor: &str) -> Value {
+        let mut context = client.context(visitor, &self.hl, &self.gl);
+        if let Some(page_id) = &self.page_id {
+            context["user"]["onBehalfOfUser"] = json!(page_id);
+        }
+        context
     }
 
     pub fn client(&self) -> &reqwest::Client {
@@ -391,6 +414,13 @@ mod tests {
     fn falls_back_to_secure_sapisid() {
         let cookies = "__Secure-3PAPISID=only/456";
         assert_eq!(sapisid(cookies), Some("only/456"));
+    }
+
+    #[test]
+    fn brand_account_is_added_to_the_request_context() {
+        let client = YtMusic::anonymous().as_brand_account("101234161234936123473");
+        let context = client.context(Client::Music, "visitor");
+        assert_eq!(context["user"]["onBehalfOfUser"], "101234161234936123473");
     }
 
     #[test]
