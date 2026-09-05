@@ -171,6 +171,75 @@ pub fn list_item_track(item: &Value) -> Option<Track> {
     })
 }
 
+fn tile_line(metadata: &Value, index: usize) -> Option<String> {
+    let line = index.to_string();
+    metadata
+        .items(&["lines", &line, "lineRenderer", "items"])
+        .iter()
+        .filter_map(|item| item.run_text(&["lineItemRenderer", "text"]))
+        .reduce(|mut all, part| {
+            all.push_str(&part);
+            all
+        })
+        .filter(|text| !text.is_empty())
+}
+
+pub fn tv_tile_track(item: &Value) -> Option<Track> {
+    let renderer = item.at(&["tileRenderer"]).unwrap_or(item);
+    let metadata = renderer.at(&["metadata", "tileMetadataRenderer"])?;
+    let video_id = renderer
+        .str_at(&["contentId"])
+        .or_else(|| renderer.str_at(&["onSelectCommand", "watchEndpoint", "videoId"]))?
+        .to_string();
+    let title = metadata.run_text(&["title"])?;
+    let artist = tile_line(metadata, 0);
+    let artists = artist
+        .filter(|name| !name.is_empty())
+        .map(|name| vec![ArtistRef { name, id: None }])
+        .unwrap_or_default();
+    let video_type = renderer
+        .str_at(&["customData", "playlistPageTileData", "musicVideoType"])
+        .or_else(|| {
+            metadata.str_at(&[
+                "title",
+                "runs",
+                "0",
+                "navigationEndpoint",
+                "watchEndpoint",
+                "watchEndpointMusicSupportedConfigs",
+                "watchEndpointMusicConfig",
+                "musicVideoType",
+            ])
+        });
+    Some(Track {
+        video_id: Some(video_id),
+        title,
+        artists,
+        album: None,
+        duration: renderer
+            .run_text(&[
+                "header",
+                "tileHeaderRenderer",
+                "thumbnailOverlays",
+                "0",
+                "thumbnailOverlayTimeStatusRenderer",
+                "text",
+            ])
+            .as_deref()
+            .and_then(parse_clock),
+        thumbnails: thumbnails(renderer),
+        explicit: false,
+        available: true,
+        kind: match video_type {
+            Some("MUSIC_VIDEO_TYPE_ATV") => TrackKind::Song,
+            _ => TrackKind::Video,
+        },
+        set_video_id: None,
+        liked: None,
+        views: None,
+    })
+}
+
 fn track_kind(first_column: &Value, has_album: bool) -> TrackKind {
     let video_type = first_column.str_at(&[
         "text",
@@ -286,6 +355,26 @@ pub fn two_row_album(item: &Value) -> Option<Album> {
     })
 }
 
+pub fn tv_tile_album(item: &Value) -> Option<Album> {
+    let renderer = item.at(&["tileRenderer"]).unwrap_or(item);
+    let metadata = renderer.at(&["metadata", "tileMetadataRenderer"])?;
+    let browse_id = renderer.str_at(&["contentId"])?.to_string();
+    let title = metadata.run_text(&["title"])?;
+    let subtitle = tile_line(metadata, 0).unwrap_or_default();
+    Some(Album {
+        browse_id,
+        playlist_id: renderer
+            .str_at(&["onSelectCommand", "watchPlaylistEndpoint", "playlistId"])
+            .map(str::to_string),
+        title,
+        artists: Vec::new(),
+        kind: album_kind(&subtitle).unwrap_or(AlbumKind::Album),
+        year: subtitle.split_whitespace().find_map(parse_year),
+        track_count: None,
+        thumbnails: thumbnails(renderer),
+    })
+}
+
 pub fn list_item_album(item: &Value) -> Option<Album> {
     let renderer = item
         .at(&["musicResponsiveListItemRenderer"])
@@ -344,6 +433,35 @@ pub fn two_row_playlist(item: &Value) -> Option<Playlist> {
         owned,
         public: privacy(renderer),
         track_count,
+        thumbnails: thumbnails(renderer),
+    })
+}
+
+pub fn tv_tile_playlist(item: &Value) -> Option<Playlist> {
+    let renderer = item.at(&["tileRenderer"]).unwrap_or(item);
+    let metadata = renderer.at(&["metadata", "tileMetadataRenderer"])?;
+    let id = renderer
+        .str_at(&["onSelectCommand", "browseEndpoint", "browseId"])
+        .or_else(|| renderer.str_at(&["contentId"]))?
+        .trim_start_matches("VL")
+        .to_string();
+    let subtitle = tile_line(metadata, 0).unwrap_or_default();
+    let parts: Vec<&str> = subtitle.split('•').map(str::trim).collect();
+    Some(Playlist {
+        id,
+        title: metadata.run_text(&["title"])?,
+        author: parts
+            .iter()
+            .find(|part| {
+                !part.is_empty()
+                    && count_from_text(part).is_none()
+                    && !part.ends_with("playlist")
+                    && !part.ends_with("Playlist")
+            })
+            .map(|part| (*part).to_string()),
+        owned: false,
+        public: None,
+        track_count: parts.iter().find_map(|part| count_from_text(part)),
         thumbnails: thumbnails(renderer),
     })
 }

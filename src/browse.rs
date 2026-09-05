@@ -16,7 +16,7 @@ const MAX_PAGES: usize = 50;
 impl YtMusic {
     pub async fn album(&self, browse_id: &str) -> Result<AlbumDetail> {
         let response = self
-            .execute("browse", Client::Music, json!({ "browseId": browse_id }))
+            .execute_music("browse", json!({ "browseId": browse_id }))
             .await?;
         let header = parse::find_renderer(&response, "musicResponsiveHeaderRenderer")
             .or_else(|| parse::find_renderer(&response, "musicDetailHeaderRenderer"))
@@ -102,7 +102,7 @@ impl YtMusic {
 
     pub async fn artist(&self, browse_id: &str) -> Result<Artist> {
         let response = self
-            .execute("browse", Client::Music, json!({ "browseId": browse_id }))
+            .execute_music("browse", json!({ "browseId": browse_id }))
             .await?;
         let header = parse::find_renderer(&response, "musicImmersiveHeaderRenderer")
             .or_else(|| parse::find_renderer(&response, "musicVisualHeaderRenderer"))
@@ -192,6 +192,7 @@ impl YtMusic {
         let privacy = privacy_of(&response);
         let header = parse::find_renderer(&response, "musicResponsiveHeaderRenderer")
             .or_else(|| parse::find_renderer(&response, "musicDetailHeaderRenderer"))
+            .or_else(|| parse::find_renderer(&response, "entityMetadataRenderer"))
             .context("playlist response has no header")?;
         let title = header.run_text(&["title"]).unwrap_or_default();
         let author = match editable {
@@ -207,7 +208,8 @@ impl YtMusic {
                         && !text.starts_with("Album")
                         && parse_year(text).is_none()
                 })
-                .map(str::to_string),
+                .map(str::to_string)
+                .or_else(|| header.run_text(&["bylines", "0", "lineRenderer"])),
         };
         let track_count = header
             .runs(&["secondSubtitle"])
@@ -253,6 +255,13 @@ fn collect_list_tracks(response: &Value, tracks: &mut Vec<Track>) {
         items.extend(shelf.items(&["contents"]));
     }
     if items.is_empty() {
+        for tile in parse::find_renderers(response, "tileRenderer") {
+            if let Some(track) = parse::tv_tile_track(tile) {
+                tracks.push(track);
+            }
+        }
+    }
+    if items.is_empty() && tracks.is_empty() {
         for shelf in parse::find_renderers(response, "musicShelfRenderer") {
             items.extend(shelf.items(&["contents"]));
         }
@@ -275,6 +284,11 @@ fn collect_list_tracks(response: &Value, tracks: &mut Vec<Track>) {
     }
 }
 
+/// The first continuation token anywhere in a response, whatever renderer holds it.
+pub(crate) fn any_continuation(response: &Value) -> Option<String> {
+    next_continuation(response)
+}
+
 fn next_continuation(response: &Value) -> Option<String> {
     for shelf in parse::find_renderers(response, "musicPlaylistShelfRenderer")
         .into_iter()
@@ -289,12 +303,45 @@ fn next_continuation(response: &Value) -> Option<String> {
             return Some(token);
         }
     }
-    parse::find_renderers(response, "continuationItemRenderer")
+    if let Some(list) = parse::find_renderer(response, "playlistVideoListRenderer")
+        && let Some(token) = parse::shelf_continuation(list)
+    {
+        return Some(token);
+    }
+    if let Some(token) = parse::find_renderers(response, "continuationItemRenderer")
         .into_iter()
         .find_map(|item| {
             item.str_at(&["continuationEndpoint", "continuationCommand", "token"])
                 .map(str::to_string)
         })
+    {
+        return Some(token);
+    }
+    let mut found = Vec::new();
+    crate::nav::find_all(response, "nextContinuationData", &mut found);
+    found
+        .into_iter()
+        .find_map(|node| node.str_at(&["continuation"]).map(str::to_string))
+}
+
+pub(crate) fn tab_continuation(response: &Value, browse_id: &str) -> Option<String> {
+    let mut tabs = Vec::new();
+    crate::nav::find_all(response, "tabRenderer", &mut tabs);
+    let named = tabs
+        .iter()
+        .find(|tab| tab.str_at(&["endpoint", "browseEndpoint", "browseId"]) == Some(browse_id));
+    named
+        .or(tabs.first())
+        .and_then(|tab| {
+            tab.str_at(&[
+                "content",
+                "tvSurfaceContentRenderer",
+                "continuation",
+                "reloadContinuationData",
+                "continuation",
+            ])
+        })
+        .map(str::to_string)
 }
 
 fn playlist_id_of(response: &Value) -> Option<String> {

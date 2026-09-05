@@ -1,5 +1,4 @@
 pub mod browse;
-pub mod browser;
 pub mod client;
 pub mod context;
 pub mod dedup;

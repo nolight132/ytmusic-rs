@@ -53,8 +53,7 @@ impl YtMusic {
                 }
             },
         });
-        self.execute_with("player", client, payload, !self.is_cookie_auth())
-            .await
+        self.execute("player", client, payload).await
     }
 
     pub async fn best_audio(&self, video_id: &str) -> Result<AudioFormat> {
