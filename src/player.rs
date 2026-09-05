@@ -62,7 +62,7 @@ impl YtMusic {
             Ok(format) => Ok(format),
             Err(guest) if self.is_authenticated() => {
                 log::debug!("player: the guest stream for {video_id} failed ({guest:#})");
-                self.signed_audio(video_id)
+                self.signed_audio(video_id, false)
                     .await
                     .with_context(|| format!("the guest stream failed too ({guest:#})"))
             }
@@ -82,6 +82,26 @@ impl YtMusic {
         Ok((format, data))
     }
 
+    /// Tries the signed-in account's best audio, including Premium formats, before
+    /// falling back to ordinary playback if resolution or downloading fails.
+    pub async fn load_high_quality_audio(&self, video_id: &str) -> Result<(AudioFormat, Vec<u8>)> {
+        if self.is_authenticated() {
+            let signed = async {
+                let format = self.signed_audio(video_id, true).await?;
+                let data = self.download(&format).await?;
+                Ok::<_, anyhow::Error>((format, data))
+            }
+            .await;
+            match signed {
+                Ok(audio) => return Ok(audio),
+                Err(_) => log::warn!(
+                    "player: high-quality audio failed for {video_id}; trying ordinary playback"
+                ),
+            }
+        }
+        self.load_audio(video_id).await
+    }
+
     async fn guest_audio(&self, video_id: &str) -> Result<AudioFormat> {
         let response = self.guest_player(video_id).await?;
         let audio = playable(&response, video_id)?
@@ -91,7 +111,7 @@ impl YtMusic {
         pick(audio).with_context(|| format!("no direct audio stream for {video_id}"))
     }
 
-    async fn signed_audio(&self, video_id: &str) -> Result<AudioFormat> {
+    async fn signed_audio(&self, video_id: &str, high_quality: bool) -> Result<AudioFormat> {
         let solver = self.solver().await?;
         log::debug!(
             "player: asking {} for {video_id}, player {} sts {}",
@@ -112,12 +132,7 @@ impl YtMusic {
             },
         });
         let response = self.execute("player", Client::Music, payload).await?;
-        let mut audio: Vec<Ciphered> = playable(&response, video_id)?
-            .iter()
-            .filter_map(ciphered)
-            .collect();
-        audio.sort_by_key(|format| std::cmp::Reverse(format.bitrate));
-        let chosen = prefer_aac(audio)
+        let chosen = select_audio(playable(&response, video_id)?, high_quality)
             .with_context(|| format!("no addressable audio stream for {video_id}"))?;
         let url = decipher(&solver, &chosen).await?;
         Ok(AudioFormat {
@@ -358,15 +373,14 @@ fn set_params(url: &mut reqwest::Url, changes: &[(&str, &str)]) {
     query.finish();
 }
 
-fn prefer_aac(formats: Vec<Ciphered>) -> Option<Ciphered> {
-    let aac = formats
-        .iter()
-        .position(|format| format.mime.starts_with("audio/mp4"));
-    let mut formats = formats;
-    match aac {
-        Some(at) => Some(formats.swap_remove(at)),
-        None => formats.into_iter().next(),
-    }
+/// High quality ranks all audio codecs by bitrate; ordinary playback keeps its AAC preference.
+fn select_audio(formats: &[Value], high_quality: bool) -> Option<Ciphered> {
+    formats.iter().filter_map(ciphered).max_by_key(|format| {
+        (
+            !high_quality && format.mime.starts_with("audio/mp4"),
+            format.bitrate,
+        )
+    })
 }
 
 fn playable<'a>(response: &'a Value, video_id: &str) -> Result<&'a Vec<Value>> {
@@ -471,6 +485,22 @@ fn audio_format(format: &Value, client: Client) -> Option<AudioFormat> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn high_quality_selects_audio_bitrate_without_changing_ordinary_aac_preference() {
+        let mut formats = vec![
+            json!({"itag": 140, "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "bitrate": 130000, "url": "https://example.com/aac"}),
+            json!({"itag": 774, "mimeType": "audio/webm; codecs=\"opus\"", "bitrate": 280000, "url": "https://example.com/opus"}),
+            json!({"itag": 401, "mimeType": "video/mp4", "bitrate": 10000000, "url": "https://example.com/video"}),
+        ];
+        assert_eq!(select_audio(&formats, false).unwrap().itag, 140);
+        assert_eq!(select_audio(&formats, true).unwrap().itag, 774);
+        formats.push(json!({"itag": 141, "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "bitrate": 285000, "url": "https://example.com/premium-aac"}));
+        assert_eq!(select_audio(&formats, true).unwrap().itag, 141);
+        assert_eq!(select_audio(&formats, false).unwrap().itag, 141);
+        assert!(select_audio(&formats[2..3], true).is_none());
+        assert!(select_audio(&[], true).is_none());
+    }
 
     #[test]
     fn skips_ciphered_formats() {
