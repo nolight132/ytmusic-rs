@@ -17,8 +17,6 @@ pub struct YtMusic {
     solver: RwLock<Option<std::sync::Arc<crate::deobf::Solver>>>,
     player_cache: Option<PathBuf>,
     tokens: Option<RwLock<Tokens>>,
-    cookies: Option<String>,
-    authuser: usize,
     persist: Option<PathBuf>,
     pub(crate) resolve_cache: crate::dedup::ResolveCache,
     hl: String,
@@ -32,14 +30,6 @@ impl YtMusic {
             ..Self::anonymous()
         }
     }
-
-    pub fn with_cookies(cookies: impl Into<String>) -> Self {
-        Self {
-            cookies: Some(normalize_cookies(&cookies.into())),
-            ..Self::anonymous()
-        }
-    }
-
     pub fn anonymous() -> Self {
         Self {
             http: reqwest::Client::new(),
@@ -47,18 +37,11 @@ impl YtMusic {
             solver: RwLock::new(None),
             player_cache: None,
             tokens: None,
-            cookies: None,
-            authuser: 0,
             persist: None,
             resolve_cache: crate::dedup::ResolveCache::memory(),
             hl: "en".to_string(),
             gl: "US".to_string(),
         }
-    }
-
-    pub fn as_user(mut self, authuser: usize) -> Self {
-        self.authuser = authuser;
-        self
     }
 
     pub fn persist_to(mut self, path: PathBuf) -> Self {
@@ -94,6 +77,27 @@ impl YtMusic {
         self.execute_with(endpoint, client, payload, true).await
     }
 
+    pub async fn execute_music(&self, endpoint: &str, payload: Value) -> Result<Value> {
+        self.execute_with(endpoint, Client::Music, payload, !self.is_oauth_auth())
+            .await
+    }
+
+    pub async fn browse_library(&self, browse_id: &str) -> Result<Value> {
+        let response = self
+            .execute("browse", Client::Music, json!({ "browseId": browse_id }))
+            .await?;
+        let mut tiles = Vec::new();
+        crate::nav::find_all(&response, "tileRenderer", &mut tiles);
+        if !tiles.is_empty() {
+            return Ok(response);
+        }
+        let Some(token) = crate::browse::tab_continuation(&response, browse_id) else {
+            return Ok(response);
+        };
+        self.execute("browse", Client::Music, json!({ "continuation": token }))
+            .await
+    }
+
     pub async fn execute_with(
         &self,
         endpoint: &str,
@@ -117,8 +121,11 @@ impl YtMusic {
             true => self.bearer().await?,
             false => None,
         };
-        let cookies = self.cookies.as_ref().filter(|_| use_auth);
-        let authenticated = bearer.is_some() || cookies.is_some();
+        let request_client = match bearer.is_some() {
+            true => Client::Tv,
+            false => client,
+        };
+        let authenticated = bearer.is_some();
         let held = match authenticated {
             true => String::new(),
             false => match guest {
@@ -128,11 +135,11 @@ impl YtMusic {
         };
         let visitor = held.as_str();
         let mut body = payload;
-        let context = client.context(visitor, &self.hl, &self.gl);
+        let context = request_client.context(visitor, &self.hl, &self.gl);
         body.as_object_mut()
             .context("payload must be an object")?
             .insert("context".to_string(), context);
-        if client == Client::Music {
+        if request_client == Client::Music {
             body["isAudioOnly"] = json!(true);
         }
         let (base, origin) = match client {
@@ -147,24 +154,21 @@ impl YtMusic {
             .header("Accept-Language", "*")
             .header("Content-Type", "application/json")
             .header("Origin", origin)
-            .header("User-Agent", client.user_agent())
-            .header("X-Youtube-Client-Name", client.id().to_string())
-            .header("X-Youtube-Client-Version", client.version())
+            .header("User-Agent", request_client.user_agent())
+            .header("X-Youtube-Client-Name", request_client.id().to_string())
+            .header("X-Youtube-Client-Version", request_client.version())
             .json(&body);
-        match (cookies, &bearer) {
-            (Some(cookies), _) => {
-                let authorization =
-                    sid_authorization(cookies, origin).context("cookies have no SAPISID")?;
+        match &bearer {
+            Some(bearer) => {
+                let request_time = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_secs())
+                    .unwrap_or_default();
                 request = request
-                    .header("Authorization", authorization)
-                    .header("Cookie", cookies)
-                    .header("X-Origin", origin)
-                    .header("X-Goog-AuthUser", self.authuser.to_string());
+                    .header("Authorization", format!("Bearer {bearer}"))
+                    .header("X-Goog-Request-Time", request_time.to_string());
             }
-            (None, Some(bearer)) => {
-                request = request.header("Authorization", format!("Bearer {bearer}"));
-            }
-            (None, None) => request = request.header("X-Goog-Visitor-Id", visitor),
+            None => request = request.header("X-Goog-Visitor-Id", visitor),
         }
         let response = request
             .send()
@@ -201,16 +205,12 @@ impl YtMusic {
         Ok(value)
     }
 
-    pub fn is_cookie_auth(&self) -> bool {
-        self.cookies.is_some()
+    pub fn is_oauth_auth(&self) -> bool {
+        self.tokens.is_some()
     }
 
     pub fn is_authenticated(&self) -> bool {
-        self.cookies.is_some() || self.tokens.is_some()
-    }
-
-    pub fn authuser(&self) -> usize {
-        self.authuser
+        self.tokens.is_some()
     }
 
     pub fn client(&self) -> &reqwest::Client {
@@ -311,93 +311,4 @@ async fn fetch_visitor(http: &reqwest::Client) -> Result<String> {
         .context("the visitor response carries no visitor id")?;
     log::debug!("ytmusic: adopted a server-issued visitor id");
     Ok(issued)
-}
-
-fn normalize_cookies(input: &str) -> String {
-    let raw = input
-        .lines()
-        .find_map(|line| {
-            let line = line.trim();
-            let rest = line
-                .strip_prefix("Cookie:")
-                .or_else(|| line.strip_prefix("cookie:"))?;
-            Some(rest.trim())
-        })
-        .unwrap_or_else(|| input.trim());
-    let pairs: Vec<&str> = raw
-        .split(';')
-        .map(str::trim)
-        .filter(|pair| pair.contains('=') && !pair.contains(char::is_whitespace))
-        .collect();
-    pairs.join("; ")
-}
-
-fn cookie_value<'a>(cookies: &'a str, name: &str) -> Option<&'a str> {
-    cookies.split(';').find_map(|pair| {
-        let pair = pair.trim();
-        let (key, value) = pair.split_once('=')?;
-        (key == name).then_some(value)
-    })
-}
-
-fn sapisid(cookies: &str) -> Option<&str> {
-    cookie_value(cookies, "SAPISID").or_else(|| cookie_value(cookies, "__Secure-3PAPISID"))
-}
-
-fn sid_authorization(cookies: &str, origin: &str) -> Option<String> {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0);
-    let sapisid = sapisid(cookies)?;
-    Some(format!(
-        "SAPISIDHASH {}",
-        sid_hash(timestamp, sapisid, origin)
-    ))
-}
-
-fn sid_hash(timestamp: u64, secret: &str, origin: &str) -> String {
-    use sha1::{Digest as _, Sha1};
-    let mut hasher = Sha1::new();
-    hasher.update(format!("{timestamp} {secret} {origin}"));
-    let hash = hasher.finalize();
-    let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
-    format!("{timestamp}_{hex}")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extracts_sapisid() {
-        let cookies = "VISITOR_INFO1_LIVE=abc; SAPISID=xyz/123; __Secure-3PAPISID=xyz/123";
-        assert_eq!(sapisid(cookies), Some("xyz/123"));
-    }
-
-    #[test]
-    fn normalizes_header_blob() {
-        let blob = "POST /youtubei/v1/browse HTTP/2\nHost: music.youtube.com\nCookie: SAPISID=abc; SID=def\nOrigin: https://music.youtube.com";
-        assert_eq!(normalize_cookies(blob), "SAPISID=abc; SID=def");
-    }
-
-    #[test]
-    fn normalizes_plain_cookie_string() {
-        let plain = "SAPISID=abc;   SID=def  ";
-        assert_eq!(normalize_cookies(plain), "SAPISID=abc; SID=def");
-    }
-
-    #[test]
-    fn falls_back_to_secure_sapisid() {
-        let cookies = "__Secure-3PAPISID=only/456";
-        assert_eq!(sapisid(cookies), Some("only/456"));
-    }
-
-    #[test]
-    fn sid_hash_shape() {
-        let cookies = "SAPISID=abc; __Secure-3PAPISID=ghi";
-        let auth = sid_authorization(cookies, "https://music.youtube.com").unwrap();
-        assert!(auth.starts_with("SAPISIDHASH "));
-        assert_eq!(auth.split('_').nth(1).map(str::len), Some(40));
-    }
 }

@@ -11,17 +11,37 @@ use crate::parse;
 pub const LIKED_SONGS: &str = "LM";
 const LIBRARY_ALBUMS: &str = "FEmusic_liked_albums";
 const LIBRARY_PLAYLISTS: &str = "FEmusic_liked_playlists";
-const RESOLVE_CONCURRENCY: usize = 6;
+const LIBRARY_SONGS: &str = "FEmusic_liked_videos";
+const MAX_LIBRARY_PAGES: usize = 20;
+const RESOLVE_CONCURRENCY: usize = 16;
 
 impl YtMusic {
     pub async fn liked_songs(&self) -> Result<Vec<Track>> {
-        let detail = self.playlist(LIKED_SONGS).await?;
-        Ok(dedup::collapse(detail.tracks))
+        let mut response = self.browse_library(LIBRARY_SONGS).await?;
+        let mut tracks = Vec::new();
+        for _ in 0..MAX_LIBRARY_PAGES {
+            tracks.extend(
+                parse::find_renderers(&response, "tileRenderer")
+                    .into_iter()
+                    .filter_map(parse::tv_tile_track),
+            );
+            let Some(token) = crate::browse::any_continuation(&response) else {
+                break;
+            };
+            response = self
+                .execute("browse", Client::Music, json!({ "continuation": token }))
+                .await?;
+        }
+        if tracks.is_empty() {
+            let detail = self.playlist(LIKED_SONGS).await?;
+            tracks = detail.tracks;
+        }
+        Ok(dedup::collapse(tracks))
     }
 
     pub async fn track_duration(&self, video_id: &str) -> Option<std::time::Duration> {
         let response = self
-            .execute("next", Client::Music, json!({ "videoId": video_id }))
+            .execute_music("next", json!({ "videoId": video_id }))
             .await
             .ok()?;
         parse::find_renderers(&response, "playlistPanelVideoRenderer")
@@ -35,6 +55,10 @@ impl YtMusic {
         if !track.is_video() {
             return Ok(None);
         }
+        self.resolve_match(track).await
+    }
+
+    pub async fn resolve_match(&self, track: &Track) -> Result<Option<Track>> {
         let query = dedup::search_query(track);
         let candidates = self.search_songs(&query).await?;
         Ok(dedup::best_song_match(track, candidates))
@@ -98,19 +122,42 @@ impl YtMusic {
             let api = self.clone();
             let limit = limit.clone();
             tasks.spawn(async move {
-                if !track.is_video() {
-                    return (index, track);
-                }
                 let Some(video_id) = track.video_id.clone() else {
                     return (index, track);
                 };
-                if let Some(cached) = api.resolve_cache.get(&video_id).await {
-                    return (index, cached.unwrap_or(track));
+                let linkable = track.artists.iter().any(|artist| artist.id.is_some());
+                if !track.is_video() && track.album.is_some() && linkable {
+                    return (index, track);
                 }
-                let _permit = limit.acquire().await;
-                let resolved = api.resolve_song(&track).await.ok().flatten();
-                api.resolve_cache.put(video_id, resolved.clone()).await;
-                (index, resolved.unwrap_or(track))
+                let found = match api.resolve_cache.get(&video_id).await {
+                    Some(cached) => cached,
+                    None => {
+                        let _permit = limit.acquire().await;
+                        let resolved = api.resolve_match(&track).await.ok().flatten();
+                        api.resolve_cache.put(video_id, resolved.clone()).await;
+                        resolved
+                    }
+                };
+                let Some(found) = found else {
+                    return (index, track);
+                };
+                match track.is_video() {
+                    true => (index, found),
+                    false => {
+                        let artists = match track.artists.iter().any(|artist| artist.id.is_some()) {
+                            true => track.artists,
+                            false => found.artists,
+                        };
+                        (
+                            index,
+                            Track {
+                                album: track.album.or(found.album),
+                                artists,
+                                ..track
+                            },
+                        )
+                    }
+                }
             });
         }
         let mut resolved: Vec<(usize, Track)> = Vec::new();
@@ -125,68 +172,33 @@ impl YtMusic {
     }
 
     pub async fn library_albums(&self) -> Result<Vec<Album>> {
-        let response = self
-            .execute(
-                "browse",
-                Client::Music,
-                json!({ "browseId": LIBRARY_ALBUMS }),
-            )
-            .await?;
+        let response = self.browse_library(LIBRARY_ALBUMS).await?;
         Ok(parse::find_renderers(&response, "musicTwoRowItemRenderer")
             .into_iter()
             .filter_map(parse::two_row_album)
+            .chain(
+                parse::find_renderers(&response, "tileRenderer")
+                    .into_iter()
+                    .filter_map(parse::tv_tile_album),
+            )
             .collect())
     }
 
     pub async fn library_playlists(&self) -> Result<Vec<Playlist>> {
-        let response = self
-            .execute(
-                "browse",
-                Client::Music,
-                json!({ "browseId": LIBRARY_PLAYLISTS }),
-            )
-            .await?;
+        let response = self.browse_library(LIBRARY_PLAYLISTS).await?;
         Ok(parse::find_renderers(&response, "musicTwoRowItemRenderer")
             .into_iter()
             .filter_map(parse::two_row_playlist)
+            .chain(
+                parse::find_renderers(&response, "tileRenderer")
+                    .into_iter()
+                    .filter_map(parse::tv_tile_playlist),
+            )
             .filter(|playlist| playlist.id != LIKED_SONGS)
             .collect())
     }
 
     pub async fn profile(&self) -> Result<Profile> {
-        match self.is_cookie_auth() {
-            true => self.profile_from_menu().await,
-            false => self.profile_from_accounts().await,
-        }
-    }
-
-    async fn profile_from_menu(&self) -> Result<Profile> {
-        let response = self
-            .execute("account/account_menu", Client::Music, json!({}))
-            .await?;
-        let Some(account) = parse::find_renderer(&response, "activeAccountHeaderRenderer") else {
-            log::debug!(
-                "profile: account_menu has no active account, response: {}",
-                snippet(&response)
-            );
-            anyhow::bail!("account menu has no active account");
-        };
-        log::debug!("profile: activeAccountHeaderRenderer: {account}");
-        let email = account
-            .run_text(&["channelHandle"])
-            .or_else(|| account.run_text(&["email"]));
-        let name = account
-            .run_text(&["accountName"])
-            .or_else(|| email.clone())
-            .unwrap_or_else(|| "YouTube Music".to_string());
-        Ok(Profile {
-            name,
-            email,
-            thumbnails: parse::thumbnails(account),
-        })
-    }
-
-    async fn profile_from_accounts(&self) -> Result<Profile> {
         let response = self
             .execute("account/accounts_list", Client::Tv, json!({}))
             .await?;

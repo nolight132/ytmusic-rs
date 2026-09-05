@@ -2,7 +2,6 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::client::YtMusic;
-use crate::context::Client;
 use crate::models::{Album, Playlist, Track};
 use crate::nav::Nav as _;
 use crate::parse;
@@ -15,11 +14,7 @@ pub const PLAYLISTS: &str = "EgWKAQIoAQ%3D%3D";
 impl YtMusic {
     pub async fn search_songs(&self, query: &str) -> Result<Vec<Track>> {
         let response = self
-            .execute(
-                "search",
-                Client::Music,
-                json!({ "query": query, "params": SONGS }),
-            )
+            .execute_music("search", json!({ "query": query, "params": SONGS }))
             .await?;
         let mut tracks = Vec::new();
         for shelf in parse::find_renderers(&response, "musicShelfRenderer") {
@@ -36,11 +31,7 @@ impl YtMusic {
 
     pub async fn search_albums(&self, query: &str) -> Result<Vec<Album>> {
         let response = self
-            .execute(
-                "search",
-                Client::Music,
-                json!({ "query": query, "params": ALBUMS }),
-            )
+            .execute_music("search", json!({ "query": query, "params": ALBUMS }))
             .await?;
         let mut albums = Vec::new();
         for shelf in parse::find_renderers(&response, "musicShelfRenderer") {
@@ -55,11 +46,7 @@ impl YtMusic {
 
     pub async fn search_playlists(&self, query: &str) -> Result<Vec<Playlist>> {
         let response = self
-            .execute(
-                "search",
-                Client::Music,
-                json!({ "query": query, "params": PLAYLISTS }),
-            )
+            .execute_music("search", json!({ "query": query, "params": PLAYLISTS }))
             .await?;
         let mut playlists = Vec::new();
         for shelf in parse::find_renderers(&response, "musicShelfRenderer") {
@@ -74,11 +61,7 @@ impl YtMusic {
 
     pub async fn search_suggestions(&self, input: &str) -> Result<Vec<String>> {
         let response = self
-            .execute(
-                "music/get_search_suggestions",
-                Client::Music,
-                json!({ "input": input }),
-            )
+            .execute_music("music/get_search_suggestions", json!({ "input": input }))
             .await?;
         Ok(parse::find_renderers(&response, "searchSuggestionRenderer")
             .into_iter()
