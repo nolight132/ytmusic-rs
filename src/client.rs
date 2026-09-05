@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
@@ -12,6 +13,7 @@ const MUSIC_API_BASE: &str = "https://music.youtube.com/youtubei/v1/";
 const VISITOR_URL: &str = "https://www.youtube.com/sw.js_data";
 
 pub struct YtMusic {
+    pub(crate) premium_audio: AtomicBool,
     pub(crate) http: reqwest::Client,
     visitor: RwLock<Option<String>>,
     solver: RwLock<Option<std::sync::Arc<crate::deobf::Solver>>>,
@@ -42,6 +44,7 @@ impl YtMusic {
 
     pub fn anonymous() -> Self {
         Self {
+            premium_audio: AtomicBool::new(false),
             http: reqwest::Client::new(),
             visitor: RwLock::new(None),
             solver: RwLock::new(None),
@@ -58,7 +61,14 @@ impl YtMusic {
 
     pub fn as_user(mut self, authuser: usize) -> Self {
         self.authuser = authuser;
+        self.premium_audio = AtomicBool::new(false);
         self
+    }
+
+    /// Whether a signed-in player response has confirmed High-tier audio for this
+    /// session. False also means not checked yet; this is not a billing-status API.
+    pub fn has_premium_audio(&self) -> bool {
+        self.premium_audio.load(Ordering::Relaxed)
     }
 
     pub fn persist_to(mut self, path: PathBuf) -> Self {

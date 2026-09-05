@@ -99,7 +99,9 @@ impl YtMusic {
                 ),
             }
         }
-        self.load_audio(video_id).await
+        let format = self.guest_audio(video_id).await?;
+        let data = self.download(&format).await?;
+        Ok((format, data))
     }
 
     async fn guest_audio(&self, video_id: &str) -> Result<AudioFormat> {
@@ -134,6 +136,10 @@ impl YtMusic {
         let response = self.execute("player", Client::Music, payload).await?;
         let chosen = select_audio(playable(&response, video_id)?, high_quality)
             .with_context(|| format!("no addressable audio stream for {video_id}"))?;
+        if chosen.premium {
+            self.premium_audio
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let url = decipher(&solver, &chosen).await?;
         Ok(AudioFormat {
             itag: chosen.itag,
@@ -260,6 +266,7 @@ async fn range(
 }
 
 struct Ciphered {
+    premium: bool,
     itag: u32,
     mime: String,
     codec: String,
@@ -291,6 +298,7 @@ fn ciphered(format: &Value) -> Option<Ciphered> {
         .map(|(_, tail)| tail.trim_end_matches('"'))
         .unwrap_or_default();
     Some(Ciphered {
+        premium: format.get("audioQuality").and_then(Value::as_str) == Some("AUDIO_QUALITY_HIGH"),
         itag: format.get("itag").and_then(Value::as_u64)? as u32,
         mime: mime.to_string(),
         codec: codec.to_string(),
@@ -500,6 +508,15 @@ mod tests {
         assert_eq!(select_audio(&formats, false).unwrap().itag, 141);
         assert!(select_audio(&formats[2..3], true).is_none());
         assert!(select_audio(&[], true).is_none());
+        assert!(!select_audio(&formats, true).unwrap().premium);
+        formats[3]["audioQuality"] = json!("AUDIO_QUALITY_HIGH");
+        assert!(select_audio(&formats, true).unwrap().premium);
+        let session = YtMusic::with_cookies("invalid=1");
+        assert!(!session.has_premium_audio());
+        session
+            .premium_audio
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(!session.as_user(1).has_premium_audio());
     }
 
     #[test]
